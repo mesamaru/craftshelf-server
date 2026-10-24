@@ -2,6 +2,10 @@
 
 バージョンは `00.00.00`(メジャー.マイナー.修正)の形式です。
 
+## 03.00.01 - 2026-10-24 サービス版のリポジトリとして
+
+- このリポジトリ(`mesamaru/craftshelf-server`)を、v03 の多くの人が使うサービス版として使います。説明を書き直しました
+
 ## 03.00.00 - 2026-10-24 v03 として craftshelf のリポジトリへ
 
 - 「Craftshelf Next」として作っていたものを、CraftShelf v03 として `mesamaru/craftshelf` の `next`(自分で入れて使う版)に移しました。多くの人が使うサービス版は `mesamaru/craftshelf-server` で続けます

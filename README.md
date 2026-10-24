@@ -1,14 +1,8 @@
-# CraftShelf v03(開発中)
+# CraftShelf v03 サービス版(開発中)
 
-Minecraft サーバーの Mod・プラグインを管理する CraftShelf の次の版です。作りを新しくしました(TypeScript)。設計は [docs/DESIGN.md](docs/DESIGN.md)。
+Minecraft サーバーの Mod・プラグインを管理する CraftShelf を、多くの人が使えるサービスにしたものです(TypeScript)。設計は [docs/DESIGN.md](docs/DESIGN.md)。
 
-| ブランチ | 中身 |
-|---|---|
-| `main` | v02(安定版。いま配っているもの) |
-| `dev` | v02 の開発ビルド |
-| `next` | v03 の開発(自分で入れて使う版) |
-
-v03 は `next` で作り、まとまったら `dev` で試験し、`main` で公開します。多くの人が使うサービス版は [mesamaru/craftshelf-server](https://github.com/mesamaru/craftshelf-server) にあります(中身の多くは同じ)。
+自分のサーバー機に入れて使う版は [mesamaru/craftshelf](https://github.com/mesamaru/craftshelf)(v02 = `main`、v03 の開発 = `next`)です。このサービス版は、`next` で作った機能を取り込みながら進めます。
 
 いまできること: アカウントの作成・ログイン・二段階認証(認証アプリ)・パスキー・ログアウト、チーム(メンバーの招待・役割)、Pterodactyl パネルのサーバーの状態の確認と起動・停止、Modrinth から Mod・プラグインを探して入れる・更新する・外す。
 

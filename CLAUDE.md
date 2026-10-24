@@ -1,9 +1,9 @@
-# CraftShelf v03 開発メモ
+# CraftShelf v03 サービス版 開発メモ
 
-- **ここは `mesamaru/craftshelf` の `next` ブランチ(v03 の開発・自分で入れて使う版)**。`main` = v02(安定版)/ `dev` = v02 の開発ビルド。v02(Python)とは履歴もコードも別。多くの人が使うサービス版は別のリポジトリ `mesamaru/craftshelf-server`(`main`)。
+- **ここは `mesamaru/craftshelf-server`(v03 の多くの人が使うサービス版)**。自分で入れて使う版は `mesamaru/craftshelf` の `next`(v02 は同じリポジトリの `main`・`dev`)。
 - **v03 は `next` を中心に作る**: 利用者が `next` を見て意見を出す → `next` に作る → 同じ機能をサービス版にも入れる。`next` がまとまったら `dev` へ持っていき、`dev` で試験できたら `main` で公開する。その前に、v02 → v03 のデータの移し方と、Docker の入れ替え方を用意する(v02 のパネルは、それまで v03 に自動更新しない)。
-- **サービス版へ入れる手順**: 手元の作業フォルダーには `origin`(craftshelf)と `server`(craftshelf-server)の 2 つのリモートをつないでおく。`git switch server` → `git cherry-pick <next のコミット>` で取り込み、`VERSION`・`CHANGELOG.md` はサービス版の番号で書き直してからコミットする。サービス版にだけ要るもの(チームの上限・公開の入口など)は、サービス版だけで作る。
-- 版は `03.xx.xx`。タグは `next-v03.01.02`(リリースの仕組みはまだ無い)。
+- **`next` から取り込む手順**: 手元の作業フォルダーには `origin`(craftshelf)と `server`(craftshelf-server)の 2 つのリモートをつないでおく。`git switch server` → `git cherry-pick <next のコミット>` で取り込み、`VERSION`・`CHANGELOG.md` はサービス版の番号で書き直してからコミットする。サービス版にだけ要るもの(チームの上限・公開の入口など)は、サービス版だけで作る。
+- 版は `03.xx.xx`(`next` とは別に数える)。タグは `v03.01.02`(リリースの仕組みはまだ無い)。
 
 - 利用者への説明・UI の文言は日本語。利用者が入力した名前・メモなどには `translate="no"` を付ける。
 - 設計と方針は `docs/DESIGN.md`。構成を変えたらそちらも直す。
