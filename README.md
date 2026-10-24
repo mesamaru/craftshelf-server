@@ -2,7 +2,7 @@
 
 Minecraft サーバーの Mod・プラグインを管理する CraftShelf を、多くの人が使えるサービスにしたものです(TypeScript)。設計は [docs/DESIGN.md](docs/DESIGN.md)。
 
-自分のサーバー機に入れて使う版は [mesamaru/craftshelf](https://github.com/mesamaru/craftshelf)(v02 = `main`、v03 の開発 = `next`)です。このサービス版は、`next` で作った機能を取り込みながら進めます。
+自分のサーバー機に入れて使う版は [mesamaru/craftshelf](https://github.com/mesamaru/craftshelf)(v02 = `main`、v03 の開発 = `dev`)です。このサービス版は、`dev` で作った機能を取り込みながら進めます。
 
 いまできること: アカウントの作成・ログイン・二段階認証(認証アプリ)・パスキー・ログアウト、チーム(メンバーの招待・役割)、Pterodactyl パネルのサーバーの状態の確認と起動・停止、Modrinth から Mod・プラグインを探して入れる・更新する・外す。
 
