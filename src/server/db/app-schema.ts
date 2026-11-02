@@ -1,5 +1,5 @@
 // アプリの表(認証の表は auth-schema.ts)。変更は「足すだけ」
-import { index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { organization, user } from "./auth-schema";
 
 // チームが登録した Pterodactyl パネル(API キーは暗号化して保存)
@@ -60,4 +60,53 @@ export const installedMod = pgTable(
     installedAt: timestamp("installed_at").defaultNow().notNull(),
   },
   (t) => [uniqueIndex("installed_mod_server_file_uq").on(t.serverId, t.filename), index("installed_mod_server_idx").on(t.serverId)],
+);
+
+// v02 から取り込んだ人の二段階認証(v02 の秘密の値を暗号化して保存)。v03 で二段階認証を設定し直したら消す
+export const legacyTotp = pgTable("legacy_totp", {
+  userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
+  secretSealed: text("secret_sealed").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// チームのライブラリ(使う Mod・プラグインの目録)。ファイルは持たず、配布元のプロジェクトだけを記録する。
+// サーバーに入れたものは自動で載る。project_type = "plugin" / "mod"
+export const libraryItem = pgTable(
+  "library_item",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    projectId: text("project_id").notNull(),
+    title: text("title").notNull(),
+    slug: text("slug").notNull().default(""),
+    projectType: text("project_type").notNull(),
+    iconUrl: text("icon_url").notNull().default(""),
+    addedBy: text("added_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("library_item_team_project_uq").on(t.teamId, t.source, t.projectId)],
+);
+
+// セット: ライブラリから選んだものの組み合わせ。サーバーにまとめて入れる
+export const addonSet = pgTable(
+  "addon_set",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [index("addon_set_team_idx").on(t.teamId)],
+);
+
+export const addonSetItem = pgTable(
+  "addon_set_item",
+  {
+    setId: text("set_id").notNull().references(() => addonSet.id, { onDelete: "cascade" }),
+    itemId: text("item_id").notNull().references(() => libraryItem.id, { onDelete: "cascade" }),
+    addedAt: timestamp("added_at").defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.setId, t.itemId] })],
 );

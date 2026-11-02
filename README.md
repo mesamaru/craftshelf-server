@@ -4,7 +4,7 @@ Minecraft サーバーの Mod・プラグインを管理する CraftShelf を、
 
 自分のサーバー機に入れて使う版は [mesamaru/craftshelf](https://github.com/mesamaru/craftshelf)(v02 = `main`、v03 の開発 = `dev`)です。このサービス版は、`dev` で作った機能を取り込みながら進めます。
 
-いまできること: アカウントの作成・ログイン・二段階認証(認証アプリ)・パスキー・ログアウト、チーム(メンバーの招待・役割)、Pterodactyl パネルのサーバーの状態の確認と起動・停止、Modrinth から Mod・プラグインを探して入れる・更新する・外す。
+いまできること: アカウントの作成・ログイン・二段階認証(認証アプリ)・パスキー・ログアウト、チーム(メンバーの招待・役割)、Pterodactyl パネルのサーバーの状態の確認と起動・停止、Modrinth から Mod・プラグインを探して入れる・更新する・外す、ライブラリ(チームで使う Mod・プラグインの目録)、セット(まとめてサーバーに入れる)。
 
 ## 手元で試す(Docker を使わない)
 
@@ -25,6 +25,7 @@ npm run e2e        # ブラウザでの通しの確認(ビルドしたサーバ�
    - `BETTER_AUTH_SECRET`: `openssl rand -base64 32` で作った文字列
    - `POSTGRES_PASSWORD`: データベースのパスワード
    - `TUNNEL_TOKEN`: Cloudflare Zero Trust →「Networks」→「Tunnels」で作ったトンネルのトークン。トンネルの公開先は `http://app:3000` にします
+   - `COMPOSE_FILE=docker-compose.service.yml`: サービス版の構成を使います(`docker-compose.yml` は自分用の版の構成です)
 2. `docker compose up -d --build`
 
 app のポートは外に出しません。入口は Cloudflare Tunnel だけです(家のポートを開けず、IP も知られません)。
@@ -35,8 +36,8 @@ backup のコンテナが毎日 `BACKUP_TIME` にデータベースを取り、`
 
 | 保存先 | 設定 |
 |---|---|
-| NAS(SMB) | `BACKUP_NAS_SHARE`(例 `//nas.local/backup`)・`BACKUP_NAS_USER`・`BACKUP_NAS_PASSWORD` を入れ、`.env` に `COMPOSE_FILE=docker-compose.yml:docker-compose.nas-smb.yml` |
-| NAS(NFS) | `BACKUP_NAS_HOST`・`BACKUP_NAS_EXPORT`(例 `/volume1/backup`)を入れ、`COMPOSE_FILE=docker-compose.yml:docker-compose.nas-nfs.yml` |
+| NAS(SMB) | `BACKUP_NAS_SHARE`(例 `//nas.local/backup`)・`BACKUP_NAS_USER`・`BACKUP_NAS_PASSWORD` を入れ、`.env` に `COMPOSE_FILE=docker-compose.service.yml:docker-compose.nas-smb.yml` |
+| NAS(NFS) | `BACKUP_NAS_HOST`・`BACKUP_NAS_EXPORT`(例 `/volume1/backup`)を入れ、`COMPOSE_FILE=docker-compose.service.yml:docker-compose.nas-nfs.yml` |
 | Cloudflare R2 | `BACKUP_R2_ACCOUNT_ID`・`BACKUP_R2_ACCESS_KEY_ID`・`BACKUP_R2_SECRET_ACCESS_KEY`・`BACKUP_R2_BUCKET` |
 
 - NAS はサーバー機と同じ家の中にあるので、火事・落雷・盗難・ランサムウェアでは一緒に失われることがあります。**NAS と R2 の両方(`nas,r2`)を勧めます。**

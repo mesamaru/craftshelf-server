@@ -31,7 +31,20 @@ await step("登録するとライブラリが開く", async () => {
   await page.getByRole("button", { name: "作成" }).click();
   await page.waitForURL(base + "/");
   await page.getByRole("heading", { name: "ライブラリ" }).waitFor();
-  await page.getByText("E2E のチーム").waitFor();
+  await page.getByText(/まだ何もありません/).waitFor();
+  await page.getByText("Modrinth から足す", { exact: true }).waitFor();
+  await page.screenshot({ path: ".e2e/library.png", fullPage: true });
+  await page.locator('a.capsule[aria-label="チーム"]').waitFor(); // チームの名前は版によって違う(サービス版は「E2E のチーム」、自分用は「CraftShelf」)
+});
+
+await step("セットを作ると一覧に出る", async () => {
+  await page.goto(base + "/sets");
+  await page.getByText(/まだセットがありません/).waitFor();
+  await page.getByPlaceholder("セットの名前(例 ロビー用)").fill("ロビー用");
+  await page.getByRole("button", { name: "作る" }).click();
+  await page.getByText("ロビー用", { exact: true }).waitFor();
+  await page.getByText(/まだ何も入っていません。先にライブラリ/).waitFor();
+  await page.screenshot({ path: ".e2e/sets.png", fullPage: true });
 });
 
 await step("チームの画面に自分がオーナーとして出る", async () => {
@@ -41,12 +54,13 @@ await step("チームの画面に自分がオーナーとして出る", async ()
   await page.getByRole("button", { name: "招待のリンクを作る" }).waitFor();
 });
 
-await step("LAN の中のパネルは登録できず、理由が出る", async () => {
+// 自分用の版は家の中のパネルも登録できるので、どちらの版でも断る URL(ftp)で確かめる
+await step("おかしな URL のパネルは登録できず、理由が出る", async () => {
   await page.goto(base + "/servers");
-  await page.getByPlaceholder("パネルの URL(https://…)").fill("https://192.168.1.5");
+  await page.getByPlaceholder("パネルの URL(https://…)").fill("ftp://panel.example.com");
   await page.getByPlaceholder("Client API キー(ptlc_…)").fill("ptlc_0123456789abcdef");
   await page.getByRole("button", { name: "パネルをつなぐ" }).click();
-  await page.getByText("家の中・社内などのアドレスにはつなげません").waitFor();
+  await page.getByText(/の URL を入力してください/).waitFor();
   await page.screenshot({ path: ".e2e/servers.png", fullPage: true });
 });
 

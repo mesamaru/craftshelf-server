@@ -2,7 +2,8 @@
 
 - **ここは `mesamaru/craftshelf-server`(v03 の多くの人が使うサービス版)**。自分で入れて使う版は `mesamaru/craftshelf` の `dev`(v02 は同じリポジトリの `main`)。
 - **v03 は `craftshelf` の `dev` を中心に作る**: 利用者が `dev` を見て意見を出す → `dev` に作る → 同じ機能をこのサービス版にも入れる。サービス版は `dev` に合わせて更新する。
-- **`dev` から取り込む手順**: 手元の作業フォルダーには `origin`(craftshelf)と `server`(craftshelf-server)の 2 つのリモートをつないでおく。`git switch server` → `git cherry-pick <dev のコミット>` で取り込み、`VERSION`・`CHANGELOG.md` はサービス版の番号で書き直してからコミットする。サービス版にだけ要るもの(チームの上限・公開の入口など)は、サービス版だけで作る。`dev` の `DATA_FORMAT`(v02 のパネル向けの目印)はサービス版には要らないので取り込まない。
+- **`dev` から取り込む手順**: 手元の作業フォルダーには `origin`(craftshelf)と `server`(craftshelf-server)の 2 つのリモートをつないでおく。`git switch server` → `git cherry-pick <dev のコミット>` で取り込み、`VERSION`・`CHANGELOG.md` はサービス版の番号で書き直してからコミットする。サービス版にだけ要るもの(チームの上限・公開の入口など)は、サービス版だけで作る。`dev` の `DATA_FORMAT`(v02 のパネル向けの目印)と `.github/workflows/image.yml`(自分用の版のイメージ・プレリリースを作る)はサービス版には要らないので取り込まない。
+- **動き方は 2 つ**(`CRAFTSHELF_MODE`、`src/server/env.ts`): コードは `dev` と同じで、サービス版は `service` で動かす(`docker-compose.service.yml`。`.env` の `COMPOSE_FILE` で選ぶ)。`self`(自分用)だけの処理(v02 からの取り込み・版の切り替え・家の中のアドレスへの接続)はサービス版では動かない。どちらでも動くように作る。
 - 版は `03.xx.xx`(`dev` とは別に数える)。タグは `v03.01.02`(リリースの仕組みはまだ無い)。
 
 - 利用者への説明・UI の文言は日本語。利用者が入力した名前・メモなどには `translate="no"` を付ける。
