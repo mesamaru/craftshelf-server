@@ -4,8 +4,14 @@ import { createDb } from "./db";
 import { readEnv } from "./env";
 import { lanFetch, safeFetch } from "./net";
 import { libraryService } from "./library";
+import { portService } from "./ports";
 import { serverService } from "./servers";
 import { setService } from "./sets";
+import { eventService } from "./events";
+import { scheduleService } from "./schedule";
+import { fileService } from "./files";
+import { uploadService } from "./uploads";
+import { shareService } from "./shares";
 import { versionService } from "./versions";
 
 export const env = readEnv();
@@ -22,17 +28,24 @@ if (env.mode === "self") {
   const { maybeImportV02Library } = await import("./import-v02");
   try {
     const r = await maybeImportV02Library(db, env);
-    if (r) console.log(`[v02] ライブラリを取り込みました: ${r.items} 件・セット ${r.sets} 個(結果は /data/v03/import-v02-library.json)`);
+    if (r) console.log(`[v02] ライブラリを取り込みました: ${r.items} 件・セット ${r.sets} 個・フォルダのサーバー ${r.folders ?? 0} 台(結果は /data/v03/import-v02-library.json)`);
   } catch (e) {
     console.error("[v02] ライブラリの取り込みに失敗しました(v02 のデータはそのままです):", e);
   }
 }
 export const auth = createAuth(db, env);
 // 自分用の版は家の中のアドレスにもつなぐ。サービス版は公開されたアドレスだけ(SSRF 対策)
-const deps = { db, auth, secret: env.secret, fetch: env.mode === "self" ? lanFetch : safeFetch, allowPrivate: env.mode === "self" };
+const deps = { db, auth, secret: env.secret, fetch: env.mode === "self" ? lanFetch : safeFetch, allowPrivate: env.mode === "self",
+  ...(env.mode === "self" ? { local: { dataDir: env.dataDir } } : {}) };
 export const servers = serverService(deps);
 export const library = libraryService(deps);
 export const sets = setService(deps);
+export const events = eventService(deps);
+export const schedules = scheduleService(deps, sets);
+export const files = fileService(deps);
+export const uploads = uploadService(deps);
+export const shares = shareService(deps);
+export const ports = portService(deps);
 
 // パネルからの版の切り替え(自分用の版だけ。サービス版は Docker のイメージで入れ替える)
 export const versions = env.mode === "self" ? versionService({ fetch: safeFetch, dataDir: env.dataDir }) : null;

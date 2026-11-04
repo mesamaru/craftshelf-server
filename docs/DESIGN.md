@@ -89,19 +89,77 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - チームで使う Mod・プラグインの一覧(表 `library_item`)。**ファイルは持たず**、配布元のプロジェクト(いまは Modrinth)だけを記録する。サーバーに入れたものは自動で載る。
 - 画面(トップ)では、それぞれがどのサーバーにどの版で入っているか(`installed_mod` から)を出し、種類が合うサーバー(プラグインなら plugins/ を使うサーバー)を選んで入れられる。
 - 足すのは `library: ["edit"]`(編集者以上)。プラグインと Mod だけ。外してもサーバーのファイルは消さない。無料の上限は 1 チーム 500 件(`LIBRARY_LIMITS`)。
-- v02 からの取り込み(`maybeImportV02Library`、結果は `/data/v03/import-v02-library.json`): v02 から移った自分用の版で一度だけ。配布元が Modrinth(ID が 8 文字)とわかるプラグイン・Mod だけを載せ、v02 のセットも作る(版の固定は引き継がない)。アップロードしただけのファイル・SpigotMC・CurseForge・データパックは、名前を結果に残して飛ばす。
+- v02 からの取り込み(`maybeImportV02Library`、結果は `/data/v03/import-v02-library.json`): v02 から移った自分用の版で一度だけ。配布元が Modrinth(ID が 8 文字)とわかるプラグイン・Mod と、SpigotMC(数字の ID)とわかるプラグインだけを載せ、v02 のセットも作る(版の固定は引き継がない)。アップロードしただけのファイル・CurseForge・データパックは、名前を結果に残して飛ばす。
 
 ## セット
 
 - ライブラリから選んだものの組み合わせ(表 `addon_set`・`addon_set_item`。中身はライブラリの項目を指すだけ。ライブラリから外すとセットからも外れる)。
 - 「サーバーに入れる」(`apply`)は、サーバーの種類(プラグイン / Mod)に合うもので、このアプリで入れた記録(`installed_mod`)に無いものだけを入れる。種類の合わないものは入れない。1 件ずつ結果(入れた・入っている・入れない・入れられない)を返し、失敗しても残りは続ける。入れる処理はライブラリと同じ(`modTools` の `installInto`)。
 - 権限: 作る・中身を変える・入れるのは `library: ["edit"]`、見るのはメンバー全員。無料の上限は 1 チーム 50 個・1 セット 200 件(`SET_LIMITS`)。
-- これから: サーバーに「このセットでそろえる」を結びつけて、更新も合わせて行う。
+- サーバーに結び付けるセットは 1 台に 1 つ(表 `server_set`)。「そろえる」(`sync`)は `apply` と同じく種類の合うものだけを扱い、足りないものを入れ、入っているもの(`installed_mod`)に新しい版(`latestFile` の版が記録と違う)があれば入れ直す(= 更新。古いファイルは消す)。セットに無いものは外さない。
+- 「更新を止める」(表 `server_hold`、サーバー × 配布元 × ID)。そろえる・予約・更新の確認では、止めたものを新しい版にしない(画面の「更新」は、その場の操作なので止めない)。
+- 「前の版に戻す」: `installInto` が更新で入れ替えた版を表 `install_history` に残す(1 つにつき 10 件)。`rollback` はいちばん新しい前の版を `fileById`(Modrinth は `/version/<ID>`、CurseForge は `/files/<ID>`、アップロードは版の行)で取り直して入れ、使った記録と戻す前の版の記録を消し、`server_hold` を付ける。SpigotMC は古い版を取ってこられないので戻せない。
+- 前提: Modrinth の版の `dependencies` のうち `required` のものを `FileChoice.deps` で返し、`installInto` がまだ入っていないものを入れる(2 段まで。入れられなくても本体はそのまま)。
+- 「セットに無いものを外す」(`sync` の `removeExtra`)は、`installed_mod` の記録があるもの(このアプリで入れたもの)のうち、セットに無いものだけを外す。手で置いたファイルは記録が無いので触らない。予約では外さない(気づかないうちに消えないように)。
 
-- CurseForge・SpigotMC はまだ。CurseForge はサービスとして使うときの API キーと規約を確かめてから足す。
+- **SpigotMC**(`src/server/spiget.ts`): Spiget(SpigotMC の公開 API)で探し、Pterodactyl に `https://api.spiget.org/v2/resources/<数字の ID>/download`(Spiget の CDN へ転送される)を取り込ませる。URL はこちらで組み立てるものだけ。SpigotMC の外のサイトで配っているもの(external)・有料のもの(premium)・プラグインではないカテゴリー(Standalone・Web・DataPack)は扱わない。
+  - 動くサーバーはカテゴリーで決める(`spigetFits`): サーバー用 → Paper・Purpur・Spigot、プロキシ用 → BungeeCord、Universal → 両方。Folia・Velocity は見分けられないので入れない。Minecraft のバージョンでは絞らない(SpigotMC の対応バージョンは作者の自己申告で粗いため)。版はいちばん新しいものだけ(古い版は Spiget から取り込めない)。
+  - ファイルの名前は、名前と版から安全な文字だけで作る(作れなければ `spigot-<ID>.jar`)。
+- 配布元は `installed_mod`・`library_item` の `source`(`modrinth` / `spigot`)で分け、同じものかは「配布元 + ID」で判断する(`src/lib/sources.ts`)。
+- **CurseForge**(`src/server/curseforge.ts`、自分用の版だけ): チームが設定した利用者の API キー(表 `team_curseforge`、`seal`)で使う。サービス版では使わない(CurseForge の規約で、サービスとして使うには別の取り決めが要るため)。分類はプラグイン = 5・Mod = 6、作りは `modLoaderType`(Forge 1・Fabric 4・Quilt 5・NeoForge 6)。取り込ませるのは `downloadUrl` が forgecdn.net のものだけで、作者が外部からのダウンロードを許していないもの(`allowModDistribution: false`・`downloadUrl` が無い)は扱わない。
+
+## 操作の記録と通知
+
+- 操作の記録(表 `audit_log`。`src/server/events.ts` の `record`)。各サービスの、変える操作の最後に記録する(だれが・何を・どのサーバーに・詳しい内容)。予約で動いたものは user_id が null。見られるのは `member: ["update"]`(管理者以上)。
+- Discord への通知(表 `team_notify`)。Webhook の URL は `seal` で暗号化して保存し、`https://discord.com/api/webhooks/…`(discordapp.com・ptb・canary を含む)だけを受け付ける。記録の種類(`EVENT_KINDS`: changes・sets・schedule・power・admin)のうち、選んだものだけを送る。`allowed_mentions` を空にしてメンションさせない。送れなくても、もとの操作は失敗させない。
+
+## 予約
+
+- チームごとに 1 つ(表 `team_schedule`)。曜日・時刻(`tz`、いまは日本時間)・すること(`check` = 確かめるだけ / `sync` = そろえる)。決めるのは `server: ["update"]`。
+- `src/server/startup.ts` が 1 分ごとに `tick` を呼ぶ(前の回が終わっていなければ飛ばす)。時刻になったチームは、動かす前に `last_run_at` を条件付きで書き換え、書き換えられたときだけ動かす(同じ分に 2 回・複数のプロセスで重ねて動かさない)。
+- 中身は `setService.runForSchedule`(画面からは呼ばない)。セットを結び付けたサーバーを 1 台ずつ `applyTo` し、1 台が失敗しても残りは続ける。結果は `schedule` の種類で記録する(user_id は null)。
+
+## ファイルとコマンド
+
+- コマンド(`src/server/files.ts` の `command`)は Pterodactyl の `/command` に送る。1 行・500 文字まで、権限は `server: ["control"]`。出力はウェブソケットが要るので、いまは受け取らない(パネルのコンソールで見る)。
+- 設定ファイルは、サーバーのフォルダーの中の相対パスだけ(`cleanPath`。`..`・`.`・空の区切り・改行を断る)。開けるのはテキストの拡張子(`TEXT_FILE`)で 512 KB までのものだけ。見る・直すのは `server: ["update"]`(パスワードなどが入っていることがあるため)。
+- 保存するときは、開いたときの中身(base)とサーバーのいまの中身を比べ、違えば保存しない(409)。保存する前の中身を表 `server_file_history` に残す(1 ファイル 30 件)。
+
+## フォルダでつなぐサーバー(自分用の版だけ)
+
+- 表 `local_server`(サーバー 1 台に 1 行。`server.kind = "local"`)。`src/server/local.ts` の `localClient` は Pterodactyl のクライアントと同じ形(`PteroClient`)で、`serverOf` が種類で切り替える。ほかの処理(ライブラリ・セット・予約・ファイル・ポート)は変えない。
+- 使えるのは `deps.local` があるとき(`CRAFTSHELF_MODE=self`)だけ。サービス版はクラウドで動くので、利用者のフォルダは見えない。
+- フォルダは絶対パスで、あるフォルダだけ(`checkRoot`)。パネルのデータ(`DATA_DIR`)とそれを含むフォルダは断る。中のパスは `inside` でフォルダの外(`..`・外を指すシンボリックリンク)を断る。
+- アドオンは、パネルが配布元の CDN(cdn.modrinth.com・api.spiget.org → cdn.spiget.org)から取ってきて置く(転送は、この 3 つへのものだけを 3 回まで追う。300 MB まで。いったん .part に書いてから名前を変える)。
+- 起動・停止: `command`(`spawn` でサーバーのフォルダで実行。起動は待たない、停止は 120 秒まで待つ)/ `docker`(`/var/run/docker.sock` の HTTP API)。RCON(`rcon`)はコマンド・停止(停止のコマンドが無いとき)・状態に使う。パスワードは `seal`(`rcon:<サーバーの ID>`)。設定できるのは `server: ["update"]`。
+- v02 からの取り込み(`importFolders`): `kind=local` のうち、このマシンから見えるフォルダのものを、起動・停止・RCON の設定と一緒に取り込む(RCON のパスワードは v02 の鍵で開いて、v03 の鍵で包み直す)。
+
+## アップロードしたアドオン(自分用の版だけ)
+
+- 「ファイルは利用者側だけに置く」の方針に合わせ、自分用の版(利用者のサーバー機)でだけ受け付ける。サービス版では使えない(`deps.local` が無い)。
+- ライブラリの項目は `source = "upload"`(`project_id` はこのアプリが作る ID)。版は表 `library_file`(保存先・中の場所・大きさ・SHA-256・版・動くサーバーの種類)。同じ種類で名前が同じなら同じ項目の新しい版、同じ SHA-256 は 2 度入れない。
+- jar は `src/server/jar.ts` で、zip の目次から説明ファイルだけを取り出して読む(展開しない。1 ファイル 1 MB まで)。
+- 保存先(表 `storage_target`。設定は `seal` で暗号化): パネルの中(既定、`/data/v03/library`)・フォルダ・WebDAV・SMB。SMB は `node-smb2`(SMB 2.0・2.1、NTLMv2 に固定)で、1 回の操作ごとにつないで切る。通信への署名・SMB 3 には対応していないので、それを必須にしている相手はマウントしてフォルダとして使う。中の場所は `<種類>/<名前>/<ID の頭>-<ファイル名>`。保存先を切り替えても、いままでのファイルは元の保存先のまま(`target_id`)。ファイルが残っている保存先は消せない。
+- サーバーへは `installInto` が、サーバーの種類に合う作り(`loaders`)のいちばん新しい版を、保存先から読んで送る。Pterodactyl は `files/upload` の署名付きの先へ multipart で送る(undici の fetch には undici の FormData を使う)。フォルダのサーバーは書き込む。
+- v02 からの取り込み(`importUploads`、ライブラリ・セットより先に行う): 配布元がわからないプラグイン・Mod を `upload` の項目にし、版は v02 の保存先のファイルをそのまま指す(コピーしない)。v02 のパネルの中(`/data`、中の場所は `library/<relpath>`)・WebDAV・SMB を v03 の保存先として登録する(使う保存先にはしない)。NFS など v03 に無い方式は飛ばす。動くサーバーの種類は v02 の `meta.loader` の表示から決める。
+- アップロード・ダウンロードはファイルをそのまま送るので、サーバーの関数ではなく `/api/library/upload`・`/api/library/files/<ID>` の口を使う(権限の確認は `uploadService`)。
+
+## 共有リンクと利用状況
+
+- 共有リンク(表 `share_link`、自分用の版だけ): アップロードしたもののいちばん新しい版を、ログインしていない人に渡す。トークンは 24 バイトの乱数で、SHA-256 のハッシュだけを保存する(URL は作ったときにだけ返す)。期限は 1 時間〜30 日。いくつかなら圧縮しない zip(`src/server/zip.ts`)。URL は `/s/<トークン>/<ファイル名>`(wget などでも元の名前で保存されるように)。作るのは `library: ["edit"]`、一覧・削除は作った人(管理者はすべて)。
+- 利用状況(`usage`、管理者以上): ライブラリの件数(配布元ごと)・アップロードした版の数と大きさ(保存先ごと)・サーバー・入れたもの・セット・メンバー・共有リンクの数。
 
 ## これから決めること・作るもの
 
-1. CurseForge・SpigotMC から探す、サーバーに入っている Mod の配布元を見つける(ファイルの中身や SHA-1 から)
+1. CurseForge から探す、サーバーに入っている Mod の配布元を見つける(ファイルの中身や SHA-1 から)
 2. エージェント: 登録用のトークン・通信の約束事・02 の Python からの切り出し
 3. 公開の準備: 利用規約・プライバシーポリシー・監視・利用の上限・メールの送信(Resend などの送信サービス)・セキュリティスキャン
+
+## ポート管理
+
+- 画面は `/ports`(サーバーの画面の「ポート」から)。行 = サーバー(グループごと)、列 = ポートの種類。重複・範囲外と、見つかったポートは右上のベルに出す。
+- 表: `port_kind`(種類・範囲・読み書きするファイルと項目・並び順)・`port_group`(グループの番号と名前・並び順)・`server_port_info`(サーバーのグループ・メモ・マシン)・`server_port`(ポート)。
+- 読み取り(`src/server/ports.ts` の `scan`): Pterodactyl の割り当て(`network/allocations`)と、種類ごとの設定ファイルの項目(`files/contents`)を読む。`plugins/*/config.yml` からポートらしい項目(名前に port を含む番号)も探し、「見つかった」として聞く。
+- 重複は**同じマシン(Pterodactyl のノード)の中だけ**で確かめる(`src/lib/ports.ts` の `findProblems`。画面とサーバーで同じものを使う)。
+- 番号を変えると、設定ファイルのその行の番号だけを書き換える(`src/server/port-config.ts`。properties と、字下げで入れ子にする YAML・HOCON・TOML)。割り当てのポートはパネルの「ネットワーク」で変える。
+- 見る: チームのメンバー全員。読み取り直す(再読込。Pterodactyl への問い合わせが多い)・種類・グループ・ポートを変える(ファイルの書き換えを含む): `server: ["update"]`。

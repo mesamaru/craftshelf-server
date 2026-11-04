@@ -32,7 +32,7 @@ await step("登録するとライブラリが開く", async () => {
   await page.waitForURL(base + "/");
   await page.getByRole("heading", { name: "ライブラリ" }).waitFor();
   await page.getByText(/まだ何もありません/).waitFor();
-  await page.getByText("Modrinth から足す", { exact: true }).waitFor();
+  await page.getByText("配布元から足す", { exact: true }).waitFor();
   await page.screenshot({ path: ".e2e/library.png", fullPage: true });
   await page.locator('a.capsule[aria-label="チーム"]').waitFor(); // チームの名前は版によって違う(サービス版は「E2E のチーム」、自分用は「CraftShelf」)
 });
@@ -44,6 +44,7 @@ await step("セットを作ると一覧に出る", async () => {
   await page.getByRole("button", { name: "作る" }).click();
   await page.getByText("ロビー用", { exact: true }).waitFor();
   await page.getByText(/まだ何も入っていません。先にライブラリ/).waitFor();
+  await page.getByText("予約を使う").waitFor(); // 予約の欄も出る
   await page.screenshot({ path: ".e2e/sets.png", fullPage: true });
 });
 
@@ -55,6 +56,14 @@ await step("チームの画面に自分がオーナーとして出る", async ()
 });
 
 // 自分用の版は家の中のパネルも登録できるので、どちらの版でも断る URL(ftp)で確かめる
+await step("チームの画面から、操作の記録と Discord への通知を開ける", async () => {
+  await page.goto(base + "/team");
+  await page.getByRole("link", { name: "操作の記録と Discord への通知" }).click();
+  await page.getByText("Discord への通知", { exact: true }).waitFor();
+  await page.getByText("セットを作る").first().waitFor(); // さっき作ったセットが記録に出る
+  await page.screenshot({ path: ".e2e/activity.png", fullPage: true });
+});
+
 await step("おかしな URL のパネルは登録できず、理由が出る", async () => {
   await page.goto(base + "/servers");
   await page.getByPlaceholder("パネルの URL(https://…)").fill("ftp://panel.example.com");
@@ -62,6 +71,30 @@ await step("おかしな URL のパネルは登録できず、理由が出る", 
   await page.getByRole("button", { name: "パネルをつなぐ" }).click();
   await page.getByText(/の URL を入力してください/).waitFor();
   await page.screenshot({ path: ".e2e/servers.png", fullPage: true });
+});
+
+await step("ポートの画面で、種類とグループを足して並べ替えられる", async () => {
+  await page.goto(base + "/servers");
+  await page.getByRole("link", { name: "ポート" }).click();
+  await page.waitForURL(base + "/ports");
+  await page.getByText(/サーバーがありません/).waitFor();
+  await page.getByRole("button", { name: "種類とグループ" }).click();
+  await page.getByRole("button", { name: "グループ(行)" }).click();
+  await page.getByRole("button", { name: "＋ グループを追加" }).click();
+  await page.getByLabel("番号").last().fill("90");
+  await page.getByLabel("名前").last().fill("Proxy");
+  await page.getByRole("button", { name: "ポートの種類(列)" }).click();
+  await page.getByLabel("上へ").nth(1).click(); // 2 つ目の種類を一番上へ
+  await page.screenshot({ path: ".e2e/ports-rules.png", fullPage: true });
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  const heads = await page.locator(".ports-table th").allTextContents().catch(() => []);
+  await page.getByRole("button", { name: "種類とグループ" }).click();
+  if ((await page.getByLabel("種類の名前").first().inputValue()) !== "Bedrock") throw new Error(`並び順が保存されていません ${heads}`);
+  await page.getByRole("button", { name: "グループ(行)" }).click();
+  if ((await page.getByLabel("名前").first().inputValue()) !== "Proxy") throw new Error("グループが保存されていません");
+  await page.keyboard.press("Escape");
+  await page.screenshot({ path: ".e2e/ports.png", fullPage: true });
 });
 
 await step("ログアウトはアカウントの設定にあり、押すとログイン画面に戻る", async () => {

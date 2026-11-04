@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { installMod, installedMods, modUpdates, removeMod, searchMods, serverDetail, setProfile } from "~/lib/library-api";
+import { installMod, installedMods, modUpdates, removeMod, rollbackMod, searchMods, serverDetail, setModHold, setProfile } from "~/lib/library-api";
+import { ApplyResults } from "~/lib/apply-results";
 import { PLATFORMS, PLATFORM_IDS } from "~/lib/platforms";
+import { localSettings, setLocalSettings } from "~/lib/servers-api";
+import { bindServerSet, listSets, syncServerSet } from "~/lib/sets-api";
+import { SOURCE_LABEL, type Source, pageUrl } from "~/lib/sources";
 import { useCan } from "~/lib/use-can";
 
 export const Route = createFileRoute("/servers_/$id")({
@@ -19,7 +23,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : "うまくい�
 type Installed = Awaited<ReturnType<typeof installedMods>>["items"][number];
 type Update = Awaited<ReturnType<typeof modUpdates>>[number];
 
-// サーバーの Mod・プラグイン(種類の設定・入っているもの・Modrinth から探して入れる)
+// サーバーの Mod・プラグイン(種類の設定・入っているもの・Modrinth / SpigotMC から探して入れる)
 function ServerPage() {
   const { user } = Route.useRouteContext();
   const server = Route.useLoaderData();
@@ -40,15 +44,19 @@ function ServerPage() {
       <header className="bar">
         <Link to="/servers" className="capsule">‹ サーバー</Link>
         <h1 translate="no">{server.name}</h1>
+        <Link to="/servers/$id/files" params={{ id: server.id }} className="capsule">ファイルとコマンド</Link>
       </header>
 
       <Profile id={server.id} profile={server.profile} editable={can({ server: ["update"] })} />
+      {server.kind === "local" && can({ server: ["update"] }) && <LocalControl id={server.id} />}
 
       {server.profile && (
         <>
+          <SetBinding id={server.id} name={server.name} edit={edit} onSynced={reload} />
           <Installed id={server.id} items={items} error={error} edit={edit}
             dir={PLATFORMS[server.profile.platform].dir} onChange={reload} />
-          {edit && <Search id={server.id} installed={items ?? []} onInstalled={reload} />}
+          {edit && <Search id={server.id} installed={items ?? []}
+            sources={(server.sources as Source[]).filter((s) => s !== "spigot" || PLATFORMS[server.profile!.platform].type === "plugin")} onInstalled={reload} />}
         </>
       )}
     </main>
@@ -107,6 +115,8 @@ function Installed({ id, items, error, edit, dir, onChange }:
   const check = useServerFn(modUpdates);
   const install = useServerFn(installMod);
   const remove = useServerFn(removeMod);
+  const hold = useServerFn(setModHold);
+  const rollback = useServerFn(rollbackMod);
   const [updates, setUpdates] = useState<Map<string, Update> | null>(null);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
@@ -144,17 +154,30 @@ function Installed({ id, items, error, edit, dir, onChange }:
                   <span className="muted" translate="no">
                     {m.versionNumber} · {m.filename}
                     {u && <span className="badge">新しい版 {u.latest}</span>}
+                    {m.held && <span className="badge muted-badge">更新を止めています</span>}
                   </span>
                 )}
               </span>
               {edit && u && (
                 <button className="trail link" type="button" disabled={!!busy}
-                  onClick={() => run(m.filename, async () => { await install({ data: { id, projectId: u.projectId } }); setUpdates((p) => { const n = new Map(p); n.delete(m.filename); return n; }); })}>
+                  onClick={() => run(m.filename, async () => { await install({ data: { id, projectId: u.projectId, source: u.source } }); setUpdates((p) => { const n = new Map(p); n.delete(m.filename); return n; }); })}>
                   {busy === m.filename ? "更新中…" : "更新"}
                 </button>
               )}
+              {edit && m.canRollback && m.projectId && m.source && (
+                <button className={`${u ? "" : "trail "}link`} type="button" disabled={!!busy}
+                  onClick={() => confirm(`${m.title} を前の版に戻しますか?(戻したあとは「更新を止める」になります)`) && run(`rb:${m.filename}`, () => rollback({ data: { id, projectId: m.projectId!, source: m.source as Source } }))}>
+                  {busy === `rb:${m.filename}` ? "戻しています…" : "前の版に戻す"}
+                </button>
+              )}
+              {edit && m.projectId && m.source && (
+                <button className={`${u || m.canRollback ? "" : "trail "}link`} type="button" disabled={!!busy}
+                  onClick={() => run(`hold:${m.filename}`, () => hold({ data: { id, projectId: m.projectId!, source: m.source as Source, hold: !m.held } }))}>
+                  {m.held ? "止めるのをやめる" : "更新を止める"}
+                </button>
+              )}
               {edit && (
-                <button className={`${u ? "" : "trail "}link danger`} type="button" disabled={!!busy}
+                <button className={`${u || m.projectId ? "" : "trail "}link danger`} type="button" disabled={!!busy}
                   onClick={() => confirm(`${m.title ?? m.filename} を外しますか?(サーバーからファイルを消します)`) && run(m.filename, () => remove({ data: { id, filename: m.filename } }))}>
                   外す
                 </button>
@@ -169,25 +192,28 @@ function Installed({ id, items, error, edit, dir, onChange }:
         )}
         {(error || err) && <p className="row error" role="alert">{error || err}</p>}
       </section>
-      <p className="foot">Modrinth から入れたものは、版と更新がわかります。それ以外のファイルは名前だけを表示します。変更はサーバーの再起動で反映されます。</p>
+      <p className="foot">Modrinth・SpigotMC から入れたものは、版と更新がわかります。それ以外のファイルは名前だけを表示します。「更新を止める」にしたものは、セットでそろえる・予約・更新の確認で新しい版にしません。変更はサーバーの再起動で反映されます。</p>
     </>
   );
 }
 
-function Search({ id, installed, onInstalled }: { id: string; installed: Installed[]; onInstalled: () => void }) {
+function Search({ id, installed, sources, onInstalled }: { id: string; installed: Installed[]; sources: Source[]; onInstalled: () => void }) {
   const search = useServerFn(searchMods);
   const install = useServerFn(installMod);
+  const [source, setSource] = useState<Source>("modrinth");
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Awaited<ReturnType<typeof searchMods>> | null>(null);
   const [busy, setBusy] = useState("");
   const [done, setDone] = useState<Set<string>>(new Set());
+  const [note, setNote] = useState("");
   const [error, setError] = useState("");
-  const have = new Set(installed.map((m) => m.projectId).filter(Boolean));
+  const key = (src: string, projectId: string) => `${src}:${projectId}`;
+  const have = new Set(installed.filter((m) => m.projectId).map((m) => key(m.source ?? "", m.projectId!)));
 
-  const find = async () => {
+  const find = async (src = source) => {
     setError("");
     try {
-      setHits(await search({ data: { id, query } }));
+      setHits(await search({ data: { id, query, source: src } }));
     } catch (e) {
       setError(message(e));
     }
@@ -198,8 +224,9 @@ function Search({ id, installed, onInstalled }: { id: string; installed: Install
     setBusy(projectId);
     setError("");
     try {
-      await install({ data: { id, projectId } });
-      setDone((d) => new Set(d).add(projectId));
+      const r = await install({ data: { id, projectId, source } });
+      setDone((d) => new Set(d).add(key(source, projectId)));
+      if (r.deps.length) setNote(`前提も入れました: ${r.deps.map((d) => (d.ok ? `${d.title} ${d.detail}` : `${d.title}(入れられません: ${d.detail})`)).join("、")}`);
       onInstalled();
     } catch (e) {
       setError(message(e));
@@ -210,19 +237,28 @@ function Search({ id, installed, onInstalled }: { id: string; installed: Install
 
   return (
     <>
-      <div className="group-title">Modrinth から探す</div>
+      <div className="group-title">{SOURCE_LABEL[source]} から探す</div>
       <form className="group form" onSubmit={(e) => (e.preventDefault(), find())}>
+        {sources.length > 1 && (
+          <div className="row">
+            <span>配布元</span>
+            <select className="trail" value={source} aria-label="配布元"
+              onChange={(e) => { const s = e.target.value as Source; setSource(s); setHits(null); find(s); }}>
+              {sources.map((s) => <option key={s} value={s}>{SOURCE_LABEL[s]}</option>)}
+            </select>
+          </div>
+        )}
         <input className="row" type="search" placeholder="名前で探す(空なら人気順)" value={query} onChange={(e) => setQuery(e.target.value)} />
         {hits?.length === 0 && <p className="row muted">見つかりませんでした。</p>}
         {hits?.map((h) => (
           <div className="row hit" key={h.projectId}>
             {h.iconUrl ? <img src={h.iconUrl} alt="" width={40} height={40} loading="lazy" /> : <span className="icon-ph" />}
             <span className="main">
-              <a href={`https://modrinth.com/project/${h.slug || h.projectId}`} target="_blank" rel="noreferrer noopener" translate="no">{h.title}</a>
+              <a href={pageUrl(source, h.projectId, h.slug)} target="_blank" rel="noreferrer noopener" translate="no">{h.title}</a>
               <span className="muted summary" translate="no">{h.summary}</span>
               <span className="muted">{h.downloads.toLocaleString("ja-JP")} ダウンロード</span>
             </span>
-            {have.has(h.projectId) || done.has(h.projectId) ? (
+            {have.has(key(source, h.projectId)) || done.has(key(source, h.projectId)) ? (
               <span className="trail muted">入っています</span>
             ) : (
               <button className="trail capsule" type="button" disabled={!!busy} onClick={() => add(h.projectId)}>
@@ -231,8 +267,137 @@ function Search({ id, installed, onInstalled }: { id: string; installed: Install
             )}
           </div>
         ))}
+        {note && <p className="row muted" role="status">{note}</p>}
         {error && <p className="row error" role="alert">{error}</p>}
       </form>
+    </>
+  );
+}
+
+// このサーバーに結び付けたセット。「セットでそろえる」で、足りないものを入れ、新しい版があれば更新する
+function SetBinding({ id, name, edit, onSynced }: { id: string; name: string; edit: boolean; onSynced: () => void }) {
+  const load = useServerFn(listSets);
+  const bind = useServerFn(bindServerSet);
+  const sync = useServerFn(syncServerSet);
+  const [sets, setSets] = useState<Awaited<ReturnType<typeof listSets>> | null>(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [results, setResults] = useState<Awaited<ReturnType<typeof syncServerSet>> | null>(null);
+  const [removeExtra, setRemoveExtra] = useState(false);
+  const reload = () => { load().then(setSets, (e) => setError(message(e))); };
+  useEffect(reload, [id]);
+  const current = sets?.find((x) => x.servers.some((v) => v.id === id)) ?? null;
+
+  const run = async (key: string, fn: () => Promise<unknown>) => {
+    setBusy(key);
+    setError("");
+    try {
+      await fn();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  if (!sets || (!edit && !current)) return null;
+  return (
+    <>
+      <div className="group-title">セット</div>
+      <section className="group">
+        <div className="row">
+          <span>結び付けるセット</span>
+          {edit ? (
+            <select className="trail" value={current?.id ?? ""} disabled={!!busy} aria-label="結び付けるセット"
+              onChange={(e) => { const setId = e.target.value || null; run("bind", async () => { await bind({ data: { serverId: id, setId } }); setResults(null); reload(); }); }}>
+              <option value="">なし</option>
+              {sets.map((x) => <option key={x.id} value={x.id} translate="no">{x.name}({x.items.length} 件)</option>)}
+            </select>
+          ) : <span className="trail" translate="no">{current?.name}</span>}
+        </div>
+        {edit && current && (
+          <button className="row link" type="button" disabled={!!busy}
+            onClick={() => (!removeExtra || confirm("セットに無いもの(このアプリで入れたもの)をサーバーから外します。よろしいですか?"))
+              && run("sync", async () => { setResults(await sync({ data: { serverId: id, removeExtra } })); onSynced(); })}>
+            {busy === "sync" ? "そろえています…" : "セットでそろえる"}
+          </button>
+        )}
+        {edit && current && (
+          <label className="row">
+            <span>セットに無いものを外す(このアプリで入れたものだけ)</span>
+            <input className="trail" type="checkbox" checked={removeExtra} onChange={(e) => setRemoveExtra(e.target.checked)} />
+          </label>
+        )}
+        {edit && sets.length === 0 && <div className="row muted">まだセットがありません。トップの「セット」で作れます。</div>}
+        {results && <ApplyResults server={name} verb="そろえた" list={results} />}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">「セットでそろえる」は、セットのうちこのサーバーの種類に合うもので、足りないものを入れ、入っているものに新しい版があれば更新します。セットに無いものは外しません。</p>
+    </>
+  );
+}
+
+// フォルダのサーバーの起動・停止・RCON(パネルの PC でコマンドを実行するので、管理者以上だけ)
+function LocalControl({ id }: { id: string }) {
+  const load = useServerFn(localSettings);
+  const save = useServerFn(setLocalSettings);
+  const [s, setS] = useState<Awaited<ReturnType<typeof localSettings>> | null>(null);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => { load({ data: { id } }).then(setS, (e) => setError(message(e))); }, [id]);
+  if (!s) return error ? <p className="row error" role="alert">{error}</p> : null;
+
+  const submit = async (clearPassword = false) => {
+    setBusy(true);
+    setError("");
+    setNote("");
+    try {
+      await save({ data: { id, control: s.control, startCmd: s.startCmd, stopCmd: s.stopCmd, container: s.container, rconPort: s.rconPort,
+        ...(clearPassword ? { rconPassword: "" } : password ? { rconPassword: password } : {}) } });
+      setPassword("");
+      setS(await load({ data: { id } }));
+      setNote("保存しました");
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div className="group-title">起動・停止と RCON(フォルダ <span translate="no">{s.rootDir}</span>)</div>
+      <section className="group form">
+        <div className="row">
+          <span>起動・停止</span>
+          <select className="trail" value={s.control} aria-label="起動・停止の方法" onChange={(e) => setS({ ...s, control: e.target.value })}>
+            <option value="none">このパネルからはしない</option>
+            <option value="command">コマンドを実行する</option>
+            <option value="docker">Docker のコンテナ</option>
+          </select>
+        </div>
+        {s.control === "command" && (
+          <>
+            <input className="row codes" placeholder="起動のコマンド(例 systemctl start minecraft)" value={s.startCmd} onChange={(e) => setS({ ...s, startCmd: e.target.value })} aria-label="起動のコマンド" />
+            <input className="row codes" placeholder="停止のコマンド(空なら RCON の stop)" value={s.stopCmd} onChange={(e) => setS({ ...s, stopCmd: e.target.value })} aria-label="停止のコマンド" />
+          </>
+        )}
+        {s.control === "docker" && (
+          <input className="row codes" placeholder="コンテナの名前(例 minecraft)" value={s.container} onChange={(e) => setS({ ...s, container: e.target.value })} aria-label="コンテナの名前" />
+        )}
+        <input className="row" inputMode="numeric" placeholder="RCON のポート(空なら server.properties の rcon.port)" value={s.rconPort ?? ""}
+          onChange={(e) => setS({ ...s, rconPort: e.target.value.trim() ? Number(e.target.value) : null })} aria-label="RCON のポート" />
+        <input className="row" type="password" autoComplete="off" placeholder={s.hasRconPassword ? "RCON のパスワード(設定済み。変えるときだけ入力)" : "RCON のパスワード(コマンド・停止・状態に使う)"}
+          value={password} onChange={(e) => setPassword(e.target.value)} aria-label="RCON のパスワード" />
+        <div className="row actions">
+          <button className="link" type="button" disabled={busy} onClick={() => submit()}>{busy ? "保存しています…" : "保存"}</button>
+          {s.hasRconPassword && <button className="trail link danger" type="button" disabled={busy} onClick={() => submit(true)}>RCON のパスワードを消す</button>}
+        </div>
+        {note && <p className="row muted" role="status">{note}</p>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">コマンドは、パネルを動かしている PC の、サーバーのフォルダで実行します。Docker のコンテナを使うときは、パネルのコンテナに /var/run/docker.sock をマウントしてください(ほかのコンテナも操作できるようになるので、要るときだけ)。RCON は server.properties で enable-rcon=true にしてください。</p>
     </>
   );
 }

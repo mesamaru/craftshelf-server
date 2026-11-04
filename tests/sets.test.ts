@@ -15,6 +15,7 @@ const EMPTY = "EmptyPrj"; // このサーバーに合う版が無いプラグイ
 
 const files = new Map<string, string[]>([["plugins", []]]);
 const pulls: string[] = [];
+let pluginLatest = { id: "ver00001", number: "5.4.0" };
 
 const fake: FetchLike = async (url, init) => {
   const u = new URL(url);
@@ -28,8 +29,9 @@ const fake: FetchLike = async (url, init) => {
     const m = u.pathname.match(/^\/v2\/project\/(\w+)(\/version)?$/);
     if (m && projects[m[1]] && !m[2]) return json(projects[m[1]]);
     if (m?.[2] && m[1] === PLUGIN) {
-      return json([{ id: "ver00001", version_number: "5.4.0", version_type: "release", date_published: "2026-01-01", loaders: ["paper"],
-        files: [{ primary: true, filename: "LuckPerms-5.4.0.jar", url: `https://cdn.modrinth.com/data/${PLUGIN}/LuckPerms-5.4.0.jar`, size: 1, hashes: {} }] }]);
+      const { id, number } = pluginLatest;
+      return json([{ id, version_number: number, version_type: "release", date_published: "2026-01-01", loaders: ["paper"],
+        files: [{ primary: true, filename: `LuckPerms-${number}.jar`, url: `https://cdn.modrinth.com/data/${PLUGIN}/LuckPerms-${number}.jar`, size: 1, hashes: {} }] }]);
     }
     if (m?.[2]) return json([]);
     return json({}, 404);
@@ -37,12 +39,17 @@ const fake: FetchLike = async (url, init) => {
   if (u.host !== "panel.example.com") throw new Error("想定外の接続先");
   if ((init?.headers as Record<string, string>)?.Authorization !== `Bearer ${KEY}`) return json({}, 401);
   if (u.pathname === "/api/client") return json({ data: [{ attributes: { identifier: "abcd1234", name: "ロビー" } }], meta: { pagination: { total_pages: 1 } } });
-  const m = u.pathname.match(/^\/api\/client\/servers\/abcd1234\/files\/(list|pull)$/);
+  const m = u.pathname.match(/^\/api\/client\/servers\/abcd1234\/files\/(list|pull|delete)$/);
   if (m?.[1] === "list") return json({ data: (files.get(u.searchParams.get("directory")!) ?? []).map((name) => ({ attributes: { name, size: 1, is_file: true } })) });
   if (m?.[1] === "pull") {
     const body = JSON.parse(String(init?.body));
     pulls.push(body.filename);
     files.set(body.directory, [...(files.get(body.directory) ?? []), body.filename]);
+    return new Response(null, { status: 204 });
+  }
+  if (m?.[1] === "delete") {
+    const body = JSON.parse(String(init?.body));
+    files.set(body.root, (files.get(body.root) ?? []).filter((x) => !body.files.includes(x)));
     return new Response(null, { status: 204 });
   }
   return json({}, 404);
@@ -123,5 +130,69 @@ describe("セット", () => {
     await sets.remove(owner, setId);
     expect(await sets.list(owner)).toEqual([]);
     expect((await lib.catalog(owner)).items.map((i) => i.title)).toEqual(["Lithium", "LuckPerms"]);
+  });
+});
+
+describe("サーバーとセットの結び付け", () => {
+  let syncSet: string;
+
+  it("結び付けるのは編集者以上。ほかのチームのセット・サーバーは使えない", async () => {
+    syncSet = (await sets.create(owner, "同期")).id;
+    for (const title of ["Lithium", "LuckPerms"]) await sets.toggleItem(owner, syncSet, await itemId(owner, title), true);
+    expect(await code(sets.sync(owner, serverId))).toBe(400); // まだ結び付けていない
+    expect(await code(sets.bind(viewer, serverId, syncSet))).toBe(403);
+    expect(await code(sets.bind(outsider, serverId, syncSet))).toBe(404);
+    const theirs = (await sets.list(outsider))[0].id;
+    expect(await code(sets.bind(owner, serverId, theirs))).toBe(404);
+    await sets.bind(owner, serverId, syncSet);
+    expect((await sets.list(viewer)).find((x) => x.id === syncSet)?.servers.map((x) => x.name)).toEqual(["ロビー"]);
+    expect(await code(sets.sync(outsider, serverId))).toBe(404);
+  });
+
+  it("そろえると、最新なら何もせず、新しい版が出ていれば更新して古いファイルを消す。Mod は入れない", async () => {
+    let r = await sets.sync(owner, serverId);
+    expect(r.map((x) => [x.title, x.status, x.detail])).toEqual([
+      ["Lithium", "skipped", "Mod なので、Paper のサーバーには入れません"], ["LuckPerms", "present", "最新です(5.4.0)"]]);
+    pluginLatest = { id: "ver00002", number: "5.5.0" };
+    r = await sets.sync(owner, serverId);
+    expect(r[1]).toEqual({ title: "LuckPerms", status: "updated", detail: "5.4.0 → 5.5.0" });
+    expect(files.get("plugins")).toEqual(["LuckPerms-5.5.0.jar"]);
+    expect((await sets.sync(owner, serverId))[1].status).toBe("present");
+  });
+
+  it("外すと、そろえられなくなる。セットを消すと結び付けも消える", async () => {
+    await sets.bind(owner, serverId, null);
+    expect(await code(sets.sync(owner, serverId))).toBe(400);
+    await sets.bind(owner, serverId, syncSet);
+    await sets.remove(owner, syncSet);
+    expect(await code(sets.sync(owner, serverId))).toBe(400);
+  });
+});
+
+describe("更新を止める・セットに無いものを外す", () => {
+  let holdSet: string;
+
+  it("止めたものは、そろえても更新の確認でも新しい版にしない。やめれば更新する", async () => {
+    expect(await code(lib.setHold(viewer, serverId, "modrinth", PLUGIN, true))).toBe(403);
+    expect(await code(lib.setHold(owner, serverId, "modrinth", "Missing1", true))).toBe(404);
+    await lib.setHold(owner, serverId, "modrinth", PLUGIN, true);
+    expect((await lib.installed(owner, serverId)).items.find((i) => i.projectId === PLUGIN)?.held).toBe(true);
+    pluginLatest = { id: "ver00003", number: "5.6.0" };
+    expect(await lib.updates(owner, serverId)).toEqual([]);
+    holdSet = (await sets.create(owner, "止める")).id;
+    await sets.toggleItem(owner, holdSet, await itemId(owner, "LuckPerms"), true);
+    await sets.bind(owner, serverId, holdSet);
+    expect((await sets.sync(owner, serverId))[0]).toMatchObject({ status: "present", detail: "更新を止めています(5.5.0)" });
+    await lib.setHold(owner, serverId, "modrinth", PLUGIN, false);
+    expect((await sets.sync(owner, serverId))[0]).toMatchObject({ status: "updated", detail: "5.5.0 → 5.6.0" });
+  });
+
+  it("「セットに無いものを外す」は、このアプリで入れたものだけを外す(手で置いたファイルはそのまま)", async () => {
+    files.set("plugins", [...(files.get("plugins") ?? []), "Manual.jar"]);
+    await sets.toggleItem(owner, holdSet, await itemId(owner, "LuckPerms"), false);
+    expect((await sets.sync(owner, serverId)).map((x) => x.status)).toEqual([]); // 外す指定が無ければ何もしない
+    const r = await sets.sync(owner, serverId, true);
+    expect(r).toEqual([{ title: "LuckPerms", status: "removed", detail: "LuckPerms-5.6.0.jar" }]);
+    expect(files.get("plugins")).toEqual(["Manual.jar"]);
   });
 });
