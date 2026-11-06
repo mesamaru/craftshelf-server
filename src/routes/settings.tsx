@@ -6,6 +6,11 @@ import { errorText } from "~/lib/errors";
 import { getImportReport } from "~/lib/session";
 import { getVersions, installVersion, useImageVersion } from "~/lib/versions-api";
 import { useCan } from "~/lib/use-can";
+import { useServerFn } from "@tanstack/react-start";
+import { createToken, listTokens, removeToken } from "~/lib/tokens-api";
+import { getLang, setLang } from "~/lib/i18n";
+import { ACCENTS, ACCENT_LABELS, type Accent, type Mode, backgroundFrom, getTheme, saveTheme } from "~/lib/theme";
+import { sendFeedback, setTelemetry, telemetryInfo } from "~/lib/telemetry-api";
 
 export const Route = createFileRoute("/settings")({
   beforeLoad: ({ context }) => {
@@ -39,6 +44,18 @@ function Settings() {
         <div className="row"><span>メールアドレス</span><span className="trail" translate="no">{user.email.endsWith("@v02.craftshelf.invalid") ? "未設定(v02 から取り込み)" : user.email}</span></div>
       </section>
 
+      <section className="group">
+        <div className="row">
+          <span>表示する言語</span>
+          <select className="trail" defaultValue={typeof window === "undefined" ? "ja" : getLang()} onChange={(e) => setLang(e.target.value === "en" ? "en" : "ja")} aria-label="表示する言語">
+            <option value="ja" translate="no">日本語</option>
+            <option value="en" translate="no">English</option>
+          </select>
+        </div>
+      </section>
+      <p className="foot">このブラウザでの表示だけが変わります。利用者が入力した名前などは訳しません。</p>
+      <Appearance />
+
       <div className="group-title">セキュリティ</div>
       {user.legacyTotp && (
         <p className="notice" role="status">
@@ -48,8 +65,11 @@ function Settings() {
       <TwoFactor enabled={user.twoFactorEnabled} />
       <Passkeys />
 
+      <ApiTokens />
       <ImportReport userId={user.id} />
       <Versions userId={user.id} />
+      <Telemetry userId={user.id} />
+      <Feedback />
 
       <section className="group spaced">
         <button className="row danger" type="button" onClick={logout}>ログアウト</button>
@@ -243,6 +263,214 @@ function Versions({ userId }: { userId: string }) {
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
       <p className="foot">データベースは「足すだけ」で変えていくので、前の版に戻してもデータは読めます。選んだ版が起動できなかったときは、イメージの版に自動で戻ります。</p>
+    </>
+  );
+}
+
+const tokenMessage = (e: unknown) => (e instanceof Error ? e.message : "うまくいきませんでした");
+
+// API トークン(外から /api/v1 を呼ぶとき)。選んでいるチームのもので、自分の役割のとおりに動く
+function ApiTokens() {
+  const load = useServerFn(listTokens);
+  const create = useServerFn(createToken);
+  const remove = useServerFn(removeToken);
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof listTokens>> | null>(null);
+  const [name, setName] = useState("");
+  const [readOnly, setReadOnly] = useState(true);
+  const [days, setDays] = useState(90);
+  const [made, setMade] = useState("");
+  const [error, setError] = useState("");
+  const reload = () => load().then(setRows, (e) => setError(tokenMessage(e)));
+  useEffect(() => { reload(); }, []);
+
+  const submit = async () => {
+    setError("");
+    try {
+      const r = await create({ data: { name, readOnly, days } });
+      setMade(r.key);
+      setName("");
+      await reload();
+    } catch (e) {
+      setError(tokenMessage(e));
+    }
+  };
+  return (
+    <>
+      <div className="group-title">API トークン</div>
+      <section className="group">
+        {rows?.length === 0 && <div className="row muted">まだありません。</div>}
+        {rows?.map((k) => (
+          <div className="row" key={k.id}>
+            <span className="main">
+              <span translate="no">{k.name}</span>
+              <span className="muted"><span className="codes">{k.start}…</span> · {k.readOnly ? "読み取りだけ" : "役割のとおり"} · {k.expiresAt ? `${new Date(k.expiresAt).toLocaleDateString("ja-JP")} まで` : "期限なし"}{k.lastUsed ? ` · 最後に使った日 ${new Date(k.lastUsed).toLocaleDateString("ja-JP")}` : ""}</span>
+            </span>
+            <button className="trail link danger" type="button"
+              onClick={() => confirm(`トークン「${k.name}」を消しますか?(使っているスクリプトは動かなくなります)`) && remove({ data: { id: k.id } }).then(reload, (e) => setError(tokenMessage(e)))}>消す</button>
+          </div>
+        ))}
+      </section>
+      <form className="group form" onSubmit={(e) => (e.preventDefault(), submit())}>
+        <input className="row" placeholder="名前(使い道。例 毎朝の更新の確認)" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
+        <label className="row"><span>読み取りだけ(入れる・起動などはできない)</span><input className="trail" type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} /></label>
+        <div className="row">
+          <span>期限</span>
+          <select className="trail" value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label="トークンの期限">
+            <option value={30}>30 日</option><option value={90}>90 日</option><option value={365}>1 年</option><option value={0}>期限なし</option>
+          </select>
+        </div>
+        <button className="row link" type="submit" disabled={!name.trim()}>トークンを作る</button>
+        {made && (
+          <p className="row" role="status">
+            <span className="main">
+              <span>トークンを作りました。いまだけ表示します。</span>
+              <input className="codes share-url" readOnly value={made} onFocus={(e) => e.currentTarget.select()} aria-label="作ったトークン" />
+            </span>
+          </p>
+        )}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </form>
+      <p className="foot">スクリプトなどから CraftShelf を操作するときに使います(<a href="/api/v1" target="_blank" rel="noreferrer">/api/v1</a> に使える API の一覧があります)。トークンは x-api-key か Authorization: Bearer で渡します。選んでいるチームのもので、あなたの役割のとおりに動きます。</p>
+    </>
+  );
+}
+
+// 開発者への匿名の利用状況(自分用の版・管理者以上)。送る内容をそのまま見せる
+function Telemetry({ userId }: { userId: string }) {
+  const { app } = Route.useRouteContext();
+  const { can } = useCan(userId);
+  const admin = app.mode === "self" && can({ member: ["update"] });
+  const set = useServerFn(setTelemetry);
+  const [info, setInfo] = useState<Awaited<ReturnType<typeof telemetryInfo>> | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { if (admin) telemetryInfo().then(setInfo, (e) => setError(e instanceof Error ? e.message : String(e))); }, [admin]);
+  if (!admin || !info?.available) return null;
+  const change = async (enabled: boolean) => {
+    setError("");
+    try {
+      await set({ data: { enabled } });
+      setInfo(await telemetryInfo());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <>
+      <div className="group-title">開発者への利用状況の送信</div>
+      <section className="group">
+        <label className="row"><span>匿名の利用状況を送る(1 日 1 回)</span><input className="trail" type="checkbox" checked={info.enabled} onChange={(e) => change(e.target.checked)} /></label>
+        {info.lastSent && <div className="row"><span>最後に送った日時</span><span className="trail">{new Date(info.lastSent).toLocaleString("ja-JP")}</span></div>}
+        <details className="row column">
+          <summary>送る内容を見る</summary>
+          <pre className="log" translate="no">{JSON.stringify(info.preview, null, 2)}</pre>
+        </details>
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">開発の参考にするため、版・OS・使っている機能・登録数(おおまかな範囲)だけを送ります。名前・ファイル名・アドレス・IP アドレスなどは送りません。送るのは、ここをオンにしたときだけです。</p>
+    </>
+  );
+}
+
+// お問い合わせ・要望を開発者に送る
+function Feedback() {
+  const send = useServerFn(sendFeedback);
+  const [kind, setKind] = useState<"request" | "bug" | "question" | "other">("request");
+  const [message, setMessage] = useState("");
+  const [contact, setContact] = useState("");
+  const [includeEnv, setIncludeEnv] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    setNote("");
+    try {
+      await send({ data: { kind, message, contact, includeEnv } });
+      setNote("送りました。ありがとうございます");
+      setMessage("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div className="group-title">お問い合わせ・要望</div>
+      <form className="group form" onSubmit={(e) => (e.preventDefault(), submit())}>
+        <div className="row">
+          <span>種類</span>
+          <select className="trail" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} aria-label="お問い合わせの種類">
+            <option value="request">要望</option>
+            <option value="bug">不具合</option>
+            <option value="question">質問</option>
+            <option value="other">その他</option>
+          </select>
+        </div>
+        <textarea className="row" rows={4} placeholder="内容" value={message} maxLength={4000} onChange={(e) => setMessage(e.target.value)} aria-label="内容" />
+        <input className="row" placeholder="返事の宛先(任意。Discord の名前・メールアドレスなど)" value={contact} maxLength={200} onChange={(e) => setContact(e.target.value)} />
+        <label className="row"><span>版と OS も送る</span><input className="trail" type="checkbox" checked={includeEnv} onChange={(e) => setIncludeEnv(e.target.checked)} /></label>
+        <button className="row link" type="submit" disabled={busy || message.trim().length < 2}>{busy ? "送っています…" : "開発者に送る"}</button>
+        {note && <p className="row muted" role="status">{note}</p>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </form>
+    </>
+  );
+}
+
+// 見た目(このブラウザだけ): ライト・ダーク・自動、アクセントの色、背景画像
+function Appearance() {
+  const [t, setT] = useState({ mode: "auto" as Mode, accent: "blue" as Accent, background: "" });
+  useEffect(() => { setT(getTheme()); }, []); // 保存した見た目は、読み込んだあとで読む(サーバーで作った画面と合わせるため)
+  const [error, setError] = useState("");
+  const save = (next: typeof t) => {
+    setError("");
+    try {
+      saveTheme(next);
+      setT(next);
+    } catch {
+      setError("背景画像が大きすぎて保存できませんでした。小さい画像を選んでください");
+    }
+  };
+  return (
+    <>
+      <div className="group-title">見た目</div>
+      <section className="group">
+        <div className="row">
+          <span>明るさ</span>
+          <select className="trail" value={t.mode} onChange={(e) => save({ ...t, mode: e.target.value as Mode })} aria-label="明るさ">
+            <option value="auto">端末に合わせる</option>
+            <option value="light">ライト</option>
+            <option value="dark">ダーク</option>
+          </select>
+        </div>
+        <div className="row">
+          <span>アクセントの色</span>
+          <span className="trail seg" role="group" aria-label="アクセントの色">
+            {(Object.keys(ACCENTS) as Accent[]).map((a) => (
+              <button key={a} type="button" className={t.accent === a ? "on" : ""} aria-pressed={t.accent === a} onClick={() => save({ ...t, accent: a })}
+                style={{ borderColor: ACCENTS[a], ...(t.accent === a ? { background: ACCENTS[a] } : { color: ACCENTS[a] }) }}>{ACCENT_LABELS[a]}</button>
+            ))}
+          </span>
+        </div>
+        <label className="row link">
+          {t.background ? "背景画像を変える" : "背景画像を選ぶ"}
+          <input type="file" accept="image/*" hidden onChange={async (e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (!f) return;
+            try {
+              save({ ...t, background: await backgroundFrom(f) });
+            } catch {
+              setError("画像を読めませんでした");
+            }
+          }} />
+        </label>
+        {t.background && <button className="row link danger" type="button" onClick={() => save({ ...t, background: "" })}>背景画像を外す</button>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">見た目は、このブラウザだけに保存します(背景画像はサーバーに送りません)。</p>
     </>
   );
 }

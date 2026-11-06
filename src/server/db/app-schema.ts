@@ -338,3 +338,57 @@ export const shareLink = pgTable(
   },
   (t) => [uniqueIndex("share_link_token_uq").on(t.tokenHash), index("share_link_team_idx").on(t.teamId)],
 );
+
+// ユーザーごとのサーバーの割り当て(v02 の 02.23)。member_server_limit に行がある人(閲覧者・編集者)は、
+// member_server で割り当てられたサーバーだけを見る・使える。管理者・オーナーはいつでもすべて
+export const memberServerLimit = pgTable(
+  "member_server_limit",
+  {
+    teamId: text("team_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.teamId, t.userId] })],
+);
+
+export const memberServer = pgTable(
+  "member_server",
+  {
+    teamId: text("team_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    serverId: text("server_id").notNull().references(() => server.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.teamId, t.userId, t.serverId] })],
+);
+
+// サーバー本体(jar)を入れ替えた記録。入れ替える前の jar は backup_jar の名前で 1 つだけ残し、そこへ戻せる。
+// size は入れ替えたときの jar の大きさ(同じなら、入れ替えたビルドのまま。サーバーを再起動するまで version_history.json は古いため)
+export const serverSoftware = pgTable("server_software", {
+  serverId: text("server_id").primaryKey().references(() => server.id, { onDelete: "cascade" }),
+  jar: text("jar").notNull(),
+  build: text("build").notNull().default(""),
+  mc: text("mc").notNull().default(""),
+  size: integer("size").notNull().default(0),
+  backupJar: text("backup_jar").notNull().default(""),
+  backupBuild: text("backup_build").notNull().default(""),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// サーバーのアドオンの変更の履歴(v02 の「履歴と巻き戻し」)。removed は外した・入れ替えたファイルの記録(JSON)、
+// backup は外したファイルを名前を変えて残したもの(元に戻すときに名前を戻す)
+export const serverChange = pgTable(
+  "server_change",
+  {
+    id: text("id").primaryKey(),
+    serverId: text("server_id").notNull().references(() => server.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+    action: text("action").notNull(),
+    title: text("title").notNull(),
+    added: text("added").notNull().default(""),
+    removed: text("removed").notNull().default(""),
+    backup: text("backup").notNull().default(""),
+    undone: boolean("undone").notNull().default(false),
+    at: timestamp("at").defaultNow().notNull(),
+  },
+  (t) => [index("server_change_server_idx").on(t.serverId, t.at)],
+);

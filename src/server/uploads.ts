@@ -2,11 +2,12 @@
 // サーバーへ送るのは library.ts の installInto(Pterodactyl にはアップロード、フォルダのサーバーにはコピー)
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { and, desc, eq } from "drizzle-orm";
-import { PLATFORMS, type Platform } from "~/lib/platforms";
-import { libraryFile, libraryItem, storageTarget } from "./db/schema";
+import { and, desc, eq, isNull } from "drizzle-orm";
+import { PLATFORMS, type Platform, isPlatform } from "~/lib/platforms";
+import { libraryFile, libraryItem, storageTarget, installedMod, serverProfile } from "./db/schema";
 import { eventService } from "./events";
 import { HttpError, requireTeam } from "./guard";
+import { remote, serverOf } from "./servers";
 import { analyzeJar } from "./jar";
 import { SAFE_JAR, pickVersion } from "./modrinth";
 import { open, seal } from "./secrets";
@@ -48,20 +49,26 @@ export function fileStore(deps: Deps) {
     return storeFor(configOf(t), fetch);
   }
 
-  /** このサーバーの種類に合う、いちばん新しい版(無ければ null) */
-  async function pick(teamId: string, projectId: string, platform: Platform) {
+  /** このサーバーの種類に合う版(新しい順) */
+  async function choices(teamId: string, projectId: string, platform: Platform) {
     const [item] = await db.select().from(libraryItem).where(and(eq(libraryItem.teamId, teamId), eq(libraryItem.source, "upload"), eq(libraryItem.projectId, projectId)));
-    if (!item || item.projectType !== PLATFORMS[platform].type) return null;
+    if (!item || item.projectType !== PLATFORMS[platform].type) return { item, files: [] };
     const want = PLATFORMS[platform].loaders as readonly string[];
     const files = (await db.select().from(libraryFile).where(eq(libraryFile.itemId, item.id)).orderBy(desc(libraryFile.createdAt)))
       .map((f) => ({ ...f, loaders: JSON.parse(f.loaders) as string[], date_published: f.createdAt.toISOString() }))
       .filter((f) => !f.loaders.length || f.loaders.some((l) => want.includes(l))); // 調べられなかったものは、種類が合えば使う
-    const f = pickVersion(files, want);
-    return f ? { item, file: f as unknown as FileRow } : null;
+    return { item, files };
+  }
+
+  /** このサーバーの種類に合う、いちばん新しい版(無ければ null) */
+  async function pick(teamId: string, projectId: string, platform: Platform) {
+    const { item, files } = await choices(teamId, projectId, platform);
+    const f = pickVersion(files, PLATFORMS[platform].loaders);
+    return item && f ? { item, file: f as unknown as FileRow } : null;
   }
 
   const read = async (teamId: string, f: FileRow) => fromStorage(async () => (await storeOf(teamId, f.targetId)).get(f.storageKey));
-  return { storeOf, pick, read, configOf, defaultConfig };
+  return { storeOf, pick, choices, read, configOf, defaultConfig };
 }
 
 export function uploadService(deps: Deps) {
@@ -137,6 +144,42 @@ export function uploadService(deps: Deps) {
       await record({ teamId, userId: user.id, kind: "admin", action: "保存先を切り替える" });
     },
 
+    /**
+     * 保存先のファイルを、別の保存先へ移す(null はパネルの中の既定のフォルダ)。1 つずつ、移した先で中身を確かめてから元を消す。
+     * 失敗したものは元の保存先に残し、理由を返す
+     */
+    async moveFiles(headers: Headers, from: string | null, to: string | null) {
+      const { teamId, user } = await requireTeam(auth, headers, { member: ["update"] });
+      needLocal();
+      if (from === to) throw new HttpError(400, "移す先を、移す元と別の保存先にしてください");
+      for (const id of [from, to]) {
+        if (id && !(await db.select({ id: storageTarget.id }).from(storageTarget).where(and(eq(storageTarget.id, id), eq(storageTarget.teamId, teamId)))).length) {
+          throw new HttpError(404, "保存先が見つかりません");
+        }
+      }
+      const rows = await db.select({ f: libraryFile }).from(libraryFile).innerJoin(libraryItem, eq(libraryFile.itemId, libraryItem.id))
+        .where(and(eq(libraryItem.teamId, teamId), from ? eq(libraryFile.targetId, from) : isNull(libraryFile.targetId)));
+      const src = await storeOf(teamId, from);
+      const dst = await storeOf(teamId, to);
+      let moved = 0;
+      const failed: { filename: string; message: string }[] = [];
+      for (const { f } of rows) {
+        try {
+          const data = await src.get(f.storageKey);
+          await dst.put(f.storageKey, data);
+          const back = await dst.get(f.storageKey);
+          if (createHash("sha256").update(back).digest("hex") !== f.sha256) throw new StorageError("移した先の中身が元と違います");
+          await db.update(libraryFile).set({ targetId: to }).where(eq(libraryFile.id, f.id));
+          await src.remove(f.storageKey).catch(() => {}); // 元が消せなくても、移した先は使える
+          moved++;
+        } catch (e) {
+          failed.push({ filename: f.filename, message: e instanceof Error ? e.message : "移せませんでした" });
+        }
+      }
+      await record({ teamId, userId: user.id, kind: "admin", action: "保存先のファイルを移す", detail: `${moved} 個を移しました${failed.length ? `・${failed.length} 個は移せませんでした` : ""}` });
+      return { moved, failed };
+    },
+
     /** 保存先を消す(ファイルが残っているものは消せない) */
     async removeTarget(headers: Headers, id: string) {
       const { teamId, user } = await requireTeam(auth, headers, { member: ["update"] });
@@ -179,7 +222,26 @@ export function uploadService(deps: Deps) {
         version: info.version, loaders: JSON.stringify(info.loaders), mcVersions: JSON.stringify(info.mcVersions), uploadedBy: user.id,
       });
       await record({ teamId, userId: user.id, kind: "changes", action: "アップロード", target: info.name, detail: `${info.version || filename}(${info.loaders.join("・") || "種類不明"})` });
-      return { itemId: item.id, title: info.name, version: info.version, projectType: info.projectType, loaders: info.loaders };
+      return { itemId: item.id, projectId: item.projectId, fileId, title: info.name, version: info.version, projectType: info.projectType, loaders: info.loaders };
+    },
+
+    /**
+     * サーバーにある jar(配布元のわからないもの)を、アップロードしたものとしてライブラリに取り込み、
+     * このアプリで入れたものとして記録する(編集者以上・自分用の版だけ)
+     */
+    async fromServer(headers: Headers, serverId: string, filename: string) {
+      const who = await requireTeam(auth, headers, { library: ["edit"] });
+      needLocal();
+      if (/[\\/]/.test(filename) || !/\.jar$/i.test(filename)) throw new HttpError(400, "ファイルの名前が正しくありません");
+      const { row, client, remoteId } = await serverOf(deps, who, serverId);
+      const [p] = await db.select().from(serverProfile).where(eq(serverProfile.serverId, row.id));
+      if (!p || !isPlatform(p.platform)) throw new HttpError(400, "先にサーバーの種類を選んでください");
+      const dir = PLATFORMS[p.platform].dir;
+      const data = await remote(() => client.readBytes(remoteId, `${dir}/${filename}`, UPLOAD_LIMITS.fileBytes));
+      const r = await this.ingest(headers, filename, data);
+      const values = { serverId: row.id, source: "upload", projectId: r.projectId, versionId: r.fileId, versionNumber: r.version || filename, title: r.title, filename, installedBy: who.user.id, installedAt: new Date() };
+      await db.insert(installedMod).values({ id: randomUUID(), ...values }).onConflictDoUpdate({ target: [installedMod.serverId, installedMod.filename], set: values });
+      return r;
     },
 
     /** アップロードしたものの版の一覧 */

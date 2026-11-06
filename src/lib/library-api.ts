@@ -25,8 +25,12 @@ export const searchMods = createServerFn({ method: "GET" })
   .handler(async ({ data }) => (await svc()).search(headers(), data.id, data.query, data.source));
 
 export const installMod = createServerFn({ method: "POST" })
+  .validator(z.object({ id: sid, projectId: z.string().max(20), source, versionId: z.string().min(1).max(64).optional() }))
+  .handler(async ({ data }) => (await svc()).install(headers(), data.id, data.projectId, data.source, data.versionId));
+
+export const modVersions = createServerFn({ method: "GET" })
   .validator(z.object({ id: sid, projectId: z.string().max(20), source }))
-  .handler(async ({ data }) => (await svc()).install(headers(), data.id, data.projectId, data.source));
+  .handler(async ({ data }) => (await svc()).versions(headers(), data.id, data.source, data.projectId));
 
 export const removeMod = createServerFn({ method: "POST" })
   .validator(z.object({ id: sid, filename: z.string().min(1).max(200) }))
@@ -47,8 +51,8 @@ export const searchCatalog = createServerFn({ method: "GET" })
   .handler(async ({ data }) => (await svc()).searchCatalog(headers(), data.query, data.type, data.source));
 
 export const addLibraryItem = createServerFn({ method: "POST" })
-  .validator(z.object({ projectId: z.string().max(20), source }))
-  .handler(async ({ data }) => (await svc()).addItem(headers(), data.projectId, data.source));
+  .validator(z.object({ projectId: z.string().max(20), source, type: z.enum(["plugin", "mod"]).optional() }))
+  .handler(async ({ data }) => (await svc()).addItem(headers(), data.projectId, data.source, data.type));
 
 export const removeLibraryItem = createServerFn({ method: "POST" })
   .validator(z.object({ itemId: z.string().min(1).max(64) }))
@@ -59,6 +63,18 @@ export const curseforgeKey = createServerFn({ method: "GET" }).handler(async () 
 export const setCurseforgeKey = createServerFn({ method: "POST" })
   .validator(z.object({ key: z.string().max(200).nullable() }))
   .handler(async ({ data }) => (await svc()).setCurseforgeKey(headers(), data.key));
+
+export const identifyMods = createServerFn({ method: "POST" })
+  .validator(z.object({ id: sid }))
+  .handler(async ({ data }) => (await svc()).identify(headers(), data.id));
+
+export const serverChanges = createServerFn({ method: "GET" })
+  .validator(z.object({ id: sid }))
+  .handler(async ({ data }) => (await svc()).changes(headers(), data.id));
+
+export const undoChange = createServerFn({ method: "POST" })
+  .validator(z.object({ id: sid, changeId: z.string().min(1).max(64) }))
+  .handler(async ({ data }) => (await svc()).undo(headers(), data.id, data.changeId));
 
 export const rollbackMod = createServerFn({ method: "POST" })
   .validator(z.object({ id: sid, projectId: z.string().max(40), source }))

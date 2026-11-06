@@ -27,6 +27,7 @@ const fake: FetchLike = async (url, init) => {
     }
     if (u.pathname === `/v2/project/${PID}`) return json({ title: "LuckPerms", slug: "luckperms", project_type: "plugin" });
     if (u.pathname === "/v2/project/AANobbMI") return json({ title: "Sodium", slug: "sodium", project_type: "mod", icon_url: "https://cdn.modrinth.com/i.png" });
+    if (u.pathname === "/v2/project/MULTIPLA") return json({ title: "Multi", slug: "multi", project_type: "mod" }); // Fabric にも対応したプラグイン
     if (u.pathname === "/v2/project/RPRPRPRP") return json({ title: "Faithful", slug: "faithful", project_type: "resourcepack" });
     if (u.pathname === `/v2/project/${PID}/version`) {
       return json([{ id: latest.id, version_number: latest.number, version_type: "release", date_published: "2026-01-01",
@@ -37,7 +38,7 @@ const fake: FetchLike = async (url, init) => {
   if (u.host !== "panel.example.com") throw new Error("想定外の接続先");
   if ((init?.headers as Record<string, string>)?.Authorization !== `Bearer ${KEY}`) return json({}, 401);
   if (u.pathname === "/api/client") return json({ data: [{ attributes: { identifier: "abcd1234", name: "サバイバル" } }], meta: { pagination: { total_pages: 1 } } });
-  const m = u.pathname.match(/^\/api\/client\/servers\/abcd1234\/files\/(list|pull|delete)$/);
+  const m = u.pathname.match(/^\/api\/client\/servers\/abcd1234\/files\/(list|pull|delete|rename)$/);
   if (m?.[1] === "list") {
     const dir = u.searchParams.get("directory")!;
     if (!files.has(dir)) return json({}, 404);
@@ -47,6 +48,11 @@ const fake: FetchLike = async (url, init) => {
   if (m?.[1] === "pull") {
     pulls.push(body);
     files.set(body.directory, [...(files.get(body.directory) ?? []), body.filename]);
+    return new Response(null, { status: 204 });
+  }
+  if (m?.[1] === "rename") {
+    const f = body.files[0];
+    files.set(body.root, (files.get(body.root) ?? []).map((x) => (x === f.from ? f.to : x)));
     return new Response(null, { status: 204 });
   }
   if (m?.[1] === "delete") {
@@ -149,7 +155,7 @@ describe("Mod・プラグイン", () => {
     expect(await code(lib.remove(editor, id, "server.properties"))).toBe(400);
     expect(await code(lib.remove(editor, id, "Missing.jar"))).toBe(404);
     await lib.remove(editor, id, "LuckPerms-5.5.0.jar");
-    expect(files.get("plugins")).toEqual(["Other-1.0.jar"]);
+    expect(files.get("plugins")).toEqual(["Other-1.0.jar", "LuckPerms-5.5.0.jar.craftshelf-removed"]); // 消さずに名前を変えて残す
     expect((await lib.installed(viewer, id)).items.map((i) => i.filename)).toEqual(["Other-1.0.jar"]);
   });
 });
@@ -178,6 +184,11 @@ describe("ライブラリ(チームの目録)", () => {
     const cat = await lib.catalog(viewer);
     expect(cat.items.map((i) => [i.title, i.projectType, i.iconUrl])).toEqual([
       ["LuckPerms", "plugin", ""], ["Sodium", "mod", "https://cdn.modrinth.com/i.png"]]);
+    // Modrinth が "mod" と返しても、プラグインとして探して足したものはプラグイン
+    await lib.addItem(editor, "MULTIPLA", "modrinth", "plugin");
+    const multi = (await lib.catalog(viewer)).items.find((i) => i.title === "Multi")!;
+    expect(multi.projectType).toBe("plugin");
+    await lib.removeItem(editor, multi.id);
   });
 
   it("ほかのチームからは見えず、外せない。外すのは編集者以上", async () => {

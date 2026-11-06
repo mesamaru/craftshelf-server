@@ -35,11 +35,18 @@ export const isProjectType = (v: unknown): v is ProjectType => v === "plugin" ||
 // 置くファイルの名前として安全なもの(フォルダーをまたがない .jar)
 export const SAFE_JAR = /^[A-Za-z0-9][A-Za-z0-9._+\- ]{0,120}\.jar$/;
 
+// 版を選ぶときの一覧の 1 行
+export type VersionChoice = FileChoice & { date: string; release: boolean };
+const VERSIONS_SHOWN = 30;
+
 export function modrinthClient(fetch: FetchLike) {
-  async function get(path: string) {
+  async function get(path: string, body?: unknown) {
     let res: Response;
     try {
-      res = await fetch(API + path, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+      res = await fetch(API + path, {
+        method: body ? "POST" : "GET", body: body ? JSON.stringify(body) : undefined,
+        headers: { "User-Agent": UA, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) }, signal: AbortSignal.timeout(15_000),
+      });
     } catch {
       throw new ModrinthError("Modrinth に接続できません。しばらくしてからお試しください");
     }
@@ -47,6 +54,13 @@ export function modrinthClient(fetch: FetchLike) {
     if (res.status === 429) throw new ModrinthError("Modrinth へのリクエストが多すぎます。しばらく待ってからお試しください");
     if (!res.ok) throw new ModrinthError(`Modrinth からエラーが返りました(HTTP ${res.status})`);
     return res.json();
+  }
+
+  async function rawVersions(projectId: string, platform: Platform, mcVersion: string | null): Promise<Record<string, unknown>[]> {
+    if (!PROJECT_ID.test(projectId)) throw new ModrinthError("プロジェクトの ID が正しくありません");
+    const q = new URLSearchParams({ loaders: JSON.stringify(PLATFORMS[platform].loaders), include_changelog: "false" });
+    if (mcVersion) q.set("game_versions", JSON.stringify([mcVersion]));
+    return (await get(`/project/${projectId}/version?${q}`)) ?? [];
   }
 
   async function find(query: string, facets: string[][]): Promise<Hit[]> {
@@ -75,13 +89,43 @@ export function modrinthClient(fetch: FetchLike) {
     // サーバーの種類とバージョンに合う、いちばん新しい安定版のファイル(無ければ null)。
     // 同じ時期に作りの違う版(Paper 向けと Bukkit 向けなど)が出ていれば、サーバーの種類向けのもの(loaders の前のほう)を選ぶ
     async latestFile(projectId: string, platform: Platform, mcVersion: string | null): Promise<FileChoice | null> {
-      if (!PROJECT_ID.test(projectId)) throw new ModrinthError("プロジェクトの ID が正しくありません");
-      const q = new URLSearchParams({ loaders: JSON.stringify(PLATFORMS[platform].loaders), include_changelog: "false" });
-      if (mcVersion) q.set("game_versions", JSON.stringify([mcVersion]));
-      const versions: Record<string, unknown>[] = (await get(`/project/${projectId}/version?${q}`)) ?? [];
+      const versions = await rawVersions(projectId, platform, mcVersion);
       const releases = versions.filter((x) => x.version_type === "release");
       const v = pickVersion(releases.length ? releases : versions, PLATFORMS[platform].loaders);
       return v ? fileOf(projectId, v) : null;
+    },
+
+    /** サーバーの種類とバージョンに合う版(新しい順・${VERSIONS_SHOWN} 個まで。版を選んで入れるとき) */
+    async versions(projectId: string, platform: Platform, mcVersion: string | null): Promise<VersionChoice[]> {
+      const time = (v: Record<string, unknown>) => Date.parse(String(v.date_published)) || 0;
+      return (await rawVersions(projectId, platform, mcVersion)).sort((a, b) => time(b) - time(a)).flatMap((v) => {
+        const f = fileOf(projectId, v);
+        return f ? [{ ...f, date: String(v.date_published ?? ""), release: v.version_type === "release" }] : [];
+      }).slice(0, VERSIONS_SHOWN);
+    },
+
+    /** プロジェクトの名前などを、まとめて取る(ID → 中身) */
+    async projects(ids: string[]): Promise<Map<string, { title: string; slug: string; iconUrl: string }>> {
+      const out = new Map<string, { title: string; slug: string; iconUrl: string }>();
+      for (let i = 0; i < ids.length; i += 100) {
+        const part = ids.slice(i, i + 100).filter((x) => PROJECT_ID.test(x));
+        if (!part.length) continue;
+        for (const p of ((await get(`/projects?ids=${encodeURIComponent(JSON.stringify(part))}`)) ?? []) as Record<string, unknown>[]) {
+          out.set(String(p.id), { title: String(p.title ?? ""), slug: String(p.slug ?? ""), iconUrl: icon(p.icon_url) });
+        }
+      }
+      return out;
+    },
+
+    /** ファイルの SHA-1 から、Modrinth の版を探す(見つかったものだけ。SHA-1 → 版) */
+    async byHashes(sha1s: string[]): Promise<Map<string, { projectId: string; versionId: string; versionNumber: string }>> {
+      const out = new Map<string, { projectId: string; versionId: string; versionNumber: string }>();
+      if (!sha1s.length) return out;
+      const r = ((await get("/version_files", { hashes: sha1s, algorithm: "sha1" })) ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [h, v] of Object.entries(r)) {
+        if (typeof v?.project_id === "string" && PROJECT_ID.test(v.project_id)) out.set(h, { projectId: v.project_id, versionId: String(v.id), versionNumber: String(v.version_number ?? "") });
+      }
+      return out;
     },
 
     /** 決まった版のファイル(前の版に戻すとき) */

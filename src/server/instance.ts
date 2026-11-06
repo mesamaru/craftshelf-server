@@ -12,8 +12,26 @@ import { scheduleService } from "./schedule";
 import { fileService } from "./files";
 import { uploadService } from "./uploads";
 import { shareService } from "./shares";
+import { tokenService } from "./tokens";
 import { versionService } from "./versions";
+import { softwareService } from "./software";
+import { backupService } from "./backup";
+import { modpackService } from "./modpack";
+import { telemetryService } from "./telemetry";
 
+// 置いてあるバックアップで入れ替える(データベースを開く前・鍵を読む前。自分用の版だけ)
+{
+  const first = readEnv();
+  if (first.mode === "self") {
+    const { applyPendingRestore } = await import("./backup");
+    try {
+      const aside = await applyPendingRestore(first.v03Dir, first.databaseUrl);
+      if (aside) console.log(`[復元] バックアップから戻しました(前のデータは ${aside})`);
+    } catch (e) {
+      console.error("[復元] 戻せませんでした(前のデータのまま起動します):", e);
+    }
+  }
+}
 export const env = readEnv();
 export const db = await createDb(env.databaseUrl, env.migrationsDir);
 // 自分用の版が v02 と同じ /data で初めて起動したら、v02 のデータを取り込む(v02 のデータには書き込まない)
@@ -43,8 +61,14 @@ export const sets = setService(deps);
 export const events = eventService(deps);
 export const schedules = scheduleService(deps, sets);
 export const files = fileService(deps);
+export const software = softwareService(deps);
+export const backups = backupService(deps);
+export const modpacks = modpackService(deps);
+// 利用状況の送信は、同意したパネルから v02 と同じ受け口へ(送る先へのつなぎ方はサービス版と同じ)
+export const telemetry = telemetryService({ ...deps, fetch: safeFetch });
 export const uploads = uploadService(deps);
 export const shares = shareService(deps);
+export const tokens = tokenService(deps);
 export const ports = portService(deps);
 
 // パネルからの版の切り替え(自分用の版だけ。サービス版は Docker のイメージで入れ替える)

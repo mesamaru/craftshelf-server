@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { Link, createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { installMod, installedMods, modUpdates, removeMod, rollbackMod, searchMods, serverDetail, setModHold, setProfile } from "~/lib/library-api";
+import { identifyMods, serverChanges, undoChange, installMod, installedMods, modUpdates, removeMod, rollbackMod, searchMods, serverDetail, setModHold, setProfile } from "~/lib/library-api";
+import { importServerFile } from "~/lib/uploads-api";
 import { ApplyResults } from "~/lib/apply-results";
 import { PLATFORMS, PLATFORM_IDS } from "~/lib/platforms";
 import { localSettings, setLocalSettings } from "~/lib/servers-api";
 import { bindServerSet, listSets, syncServerSet } from "~/lib/sets-api";
 import { SOURCE_LABEL, type Source, pageUrl } from "~/lib/sources";
 import { useCan } from "~/lib/use-can";
+import { rollbackSoftware, softwareInfo, updateSoftware } from "~/lib/software-api";
 
 export const Route = createFileRoute("/servers_/$id")({
   beforeLoad: ({ context, params }) => {
@@ -25,7 +27,7 @@ type Update = Awaited<ReturnType<typeof modUpdates>>[number];
 
 // サーバーの Mod・プラグイン(種類の設定・入っているもの・Modrinth / SpigotMC から探して入れる)
 function ServerPage() {
-  const { user } = Route.useRouteContext();
+  const { user, app } = Route.useRouteContext();
   const server = Route.useLoaderData();
   const { can } = useCan(user.id);
   const list = useServerFn(installedMods);
@@ -52,9 +54,11 @@ function ServerPage() {
 
       {server.profile && (
         <>
+          <Software id={server.id} admin={can({ server: ["update"] })} />
           <SetBinding id={server.id} name={server.name} edit={edit} onSynced={reload} />
-          <Installed id={server.id} items={items} error={error} edit={edit}
+          <Installed id={server.id} items={items} error={error} edit={edit} local={app.mode === "self"}
             dir={PLATFORMS[server.profile.platform].dir} onChange={reload} />
+          <Changes id={server.id} edit={edit} items={items} onChange={reload} />
           {edit && <Search id={server.id} installed={items ?? []}
             sources={(server.sources as Source[]).filter((s) => s !== "spigot" || PLATFORMS[server.profile!.platform].type === "plugin")} onInstalled={reload} />}
         </>
@@ -110,8 +114,11 @@ function Profile({ id, profile, editable }:
   );
 }
 
-function Installed({ id, items, error, edit, dir, onChange }:
-  { id: string; items: Installed[] | null; error: string; edit: boolean; dir: string; onChange: () => void }) {
+function Installed({ id, items, error, edit, local, dir, onChange }:
+  { id: string; items: Installed[] | null; error: string; edit: boolean; local: boolean; dir: string; onChange: () => void }) {
+  const identify = useServerFn(identifyMods);
+  const importFile = useServerFn(importServerFile);
+  const [found, setFound] = useState("");
   const check = useServerFn(modUpdates);
   const install = useServerFn(installMod);
   const remove = useServerFn(removeMod);
@@ -176,15 +183,30 @@ function Installed({ id, items, error, edit, dir, onChange }:
                   {m.held ? "止めるのをやめる" : "更新を止める"}
                 </button>
               )}
+              {edit && local && !m.projectId && (
+                <button className="trail link" type="button" disabled={!!busy}
+                  onClick={() => run(`imp:${m.filename}`, () => importFile({ data: { id, filename: m.filename } }))}>
+                  {busy === `imp:${m.filename}` ? "取り込んでいます…" : "ライブラリに取り込む"}
+                </button>
+              )}
               {edit && (
-                <button className={`${u || m.projectId ? "" : "trail "}link danger`} type="button" disabled={!!busy}
-                  onClick={() => confirm(`${m.title ?? m.filename} を外しますか?(サーバーからファイルを消します)`) && run(m.filename, () => remove({ data: { id, filename: m.filename } }))}>
+                <button className={`${u || m.projectId || local ? "" : "trail "}link danger`} type="button" disabled={!!busy}
+                  onClick={() => confirm(`${m.title ?? m.filename} を外しますか?(「変更の履歴」から元に戻せます)`) && run(m.filename, () => remove({ data: { id, filename: m.filename } }))}>
                   外す
                 </button>
               )}
             </div>
           );
         })}
+        {edit && items && items.some((m) => !m.projectId) && (
+          <button className="row link" type="button" disabled={!!busy} onClick={() => run("identify", async () => {
+            const r = await identify({ data: { id } });
+            setFound(`${r.checked} 個を調べ、${r.found.length} 個の配布元が見つかりました${r.missing.length ? `。見つからなかったもの: ${r.missing.join("、")}` : ""}${r.curseforge ? "" : "(CurseForge は、API キーを設定すると探せます)"}`);
+          })}>
+            {busy === "identify" ? "ファイルの中身から探しています…" : `配布元を探す(わからないもの ${items.filter((m) => !m.projectId).length} 個)`}
+          </button>
+        )}
+        {found && <p className="row muted" role="status" translate="no">{found}</p>}
         {items && items.some((m) => m.projectId) && (
           <button className="row link" type="button" onClick={checkUpdates} disabled={!!busy}>
             {busy === "check" ? "確かめています…" : updates ? `更新を確かめる(${updates.size} 件あり)` : "更新を確かめる"}
@@ -192,7 +214,7 @@ function Installed({ id, items, error, edit, dir, onChange }:
         )}
         {(error || err) && <p className="row error" role="alert">{error || err}</p>}
       </section>
-      <p className="foot">Modrinth・SpigotMC から入れたものは、版と更新がわかります。それ以外のファイルは名前だけを表示します。「更新を止める」にしたものは、セットでそろえる・予約・更新の確認で新しい版にしません。変更はサーバーの再起動で反映されます。</p>
+      <p className="foot">Modrinth・SpigotMC から入れたものは、版と更新がわかります。それ以外のファイルは名前だけを表示します(「配布元を探す」で、ファイルの中身から Modrinth・CurseForge のものかを確かめられます)。「更新を止める」にしたものは、セットでそろえる・予約・更新の確認で新しい版にしません。変更はサーバーの再起動で反映されます。</p>
     </>
   );
 }
@@ -237,7 +259,7 @@ function Search({ id, installed, sources, onInstalled }: { id: string; installed
 
   return (
     <>
-      <div className="group-title">{SOURCE_LABEL[source]} から探す</div>
+      <div className="group-title">{`${SOURCE_LABEL[source]} から探す`}</div>
       <form className="group form" onSubmit={(e) => (e.preventDefault(), find())}>
         {sources.length > 1 && (
           <div className="row">
@@ -398,6 +420,118 @@ function LocalControl({ id }: { id: string }) {
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
       <p className="foot">コマンドは、パネルを動かしている PC の、サーバーのフォルダで実行します。Docker のコンテナを使うときは、パネルのコンテナに /var/run/docker.sock をマウントしてください(ほかのコンテナも操作できるようになるので、要るときだけ)。RCON は server.properties で enable-rcon=true にしてください。</p>
+    </>
+  );
+}
+
+// サーバー本体(jar): 今のビルドといちばん新しいビルド。入れ替える・入れ替える前に戻すのは管理者以上
+function Software({ id, admin }: { id: string; admin: boolean }) {
+  const load = useServerFn(softwareInfo);
+  const update = useServerFn(updateSoftware);
+  const back = useServerFn(rollbackSoftware);
+  const [info, setInfo] = useState<Awaited<ReturnType<typeof softwareInfo>> | null>(null);
+  const [restart, setRestart] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const reload = () => load({ data: { id } }).then((d) => { setInfo(d); setError(""); }, (e) => setError(message(e)));
+  useEffect(() => { reload(); }, [id]);
+  const run = async (ask: string, fn: () => Promise<string>) => {
+    if (!confirm(ask)) return;
+    setBusy(true);
+    setError("");
+    setNote("");
+    try {
+      setNote(await fn());
+      await reload();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div className="group-title">サーバー本体</div>
+      <section className="group">
+        {!info && !error && <div className="row muted">確かめています…</div>}
+        {info && (
+          <>
+            <div className="row"><span>{info.label}</span><span className="trail muted" translate="no">{info.jar || "jar がわかりません"}</span></div>
+            <div className="row"><span>今のビルド</span><span className="trail" translate="no">{info.build ? `${info.mc ? `${info.mc} · ` : ""}${info.build}` : "わかりません"}</span></div>
+            <div className="row">
+              <span>いちばん新しいビルド</span>
+              <span className="trail" translate="no">{info.latest ? info.latest.build : "確かめられません"}</span>
+            </div>
+            {info.update && <div className="row"><span className="notice small">新しいビルドがあります</span></div>}
+            {info.latest && !info.latest.auto && <a className="row link" href={info.page} target="_blank" rel="noopener noreferrer">配布ページで確かめる</a>}
+            {admin && info.update && info.latest?.auto && (
+              <>
+                <label className="row"><span>入れ替えたら再起動する</span><input className="trail" type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} /></label>
+                <button className="row link" type="button" disabled={busy || !info.jar} onClick={() => run(
+                  `${info.jar} を ${info.latest!.build} に入れ替えますか?(今の jar は残し、あとで戻せます)`,
+                  async () => { const r = await update({ data: { id, restart } }); return `${r.build} に入れ替えました${r.restarted ? "。再起動しています" : "。サーバーを再起動すると新しい jar で動きます"}`; },
+                )}>{busy ? "入れ替えています…" : "いちばん新しいビルドに入れ替える"}</button>
+              </>
+            )}
+            {admin && info.backup && (
+              <button className="row link" type="button" disabled={busy} onClick={() => run(
+                `入れ替える前の jar(${info.backup!.build || "ビルド不明"})に戻しますか?`,
+                async () => { const r = await back({ data: { id } }); return `${r.build || "前の jar"} に戻しました。サーバーを再起動すると戻した jar で動きます`; },
+              )}>{`入れ替える前の jar に戻す(${info.backup.build || "ビルド不明"})`}</button>
+            )}
+          </>
+        )}
+        {note && <p className="row muted" role="status">{note}</p>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">入れ替えるときは、サーバーが配布元から直接 jar を取り込みます。入れ替える前の jar は 1 つだけ残し、そこへ戻せます。Paper・Folia・Velocity・Purpur・Fabric は入れ替えられ、Forge などは新しい版があるかだけを確かめます。</p>
+    </>
+  );
+}
+
+// アドオンの変更の履歴(新しい順)。外したもの・入れたもの・更新を元に戻せる(編集者以上)
+function Changes({ id, edit, items, onChange }: { id: string; edit: boolean; items: Installed[] | null; onChange: () => void }) {
+  const load = useServerFn(serverChanges);
+  const undo = useServerFn(undoChange);
+  const [list, setList] = useState<Awaited<ReturnType<typeof serverChanges>> | null>(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => { load({ data: { id } }).then(setList, (e) => setError(message(e))); }, [id, items]);
+  if (!list?.length) return null;
+  const shown = open ? list : list.slice(0, 5);
+  return (
+    <>
+      <div className="group-title">変更の履歴</div>
+      <section className="group">
+        {shown.map((c) => (
+          <div className={`row${c.undone ? " faded" : ""}`} key={c.id}>
+            <span className="main">
+              <span><span translate="no">{c.title}</span>{` を${c.action === "外す" ? "外した" : c.action === "更新" ? "更新した" : "入れた"}`}</span>
+              <span className="muted small" translate="no">{new Date(c.at).toLocaleString("ja-JP")}{c.by ? ` · ${c.by}` : ""}{c.action === "更新" && c.version ? ` · 前の版 ${c.version}` : ""}{c.undone ? " · 元に戻しました" : ""}</span>
+            </span>
+            {edit && c.undoable && (
+              <button className="trail link" type="button" disabled={!!busy} onClick={async () => {
+                if (!confirm(c.action === "外す" ? `${c.title} を元に戻しますか?(外したファイルを戻します)` : c.action === "入れる" ? `${c.title} を外しますか?(入れる前に戻します)` : `${c.title} を前の版(${c.version})に戻しますか?(戻したあとは「更新を止める」になります)`)) return;
+                setBusy(c.id);
+                setError("");
+                try {
+                  await undo({ data: { id, changeId: c.id } });
+                  onChange();
+                } catch (e) {
+                  setError(message(e));
+                } finally {
+                  setBusy("");
+                }
+              }}>{busy === c.id ? "戻しています…" : "元に戻す"}</button>
+            )}
+          </div>
+        ))}
+        {list.length > 5 && <button className="row link" type="button" onClick={() => setOpen((x) => !x)}>{open ? "閉じる" : `すべて見る(${list.length} 件)`}</button>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">外したファイルは消さずに名前を変えて残すので、元に戻せます(1 台につき新しい 30 件まで)。変更はサーバーの再起動で反映されます。</p>
     </>
   );
 }

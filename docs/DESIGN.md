@@ -98,8 +98,10 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - 権限: 作る・中身を変える・入れるのは `library: ["edit"]`、見るのはメンバー全員。無料の上限は 1 チーム 50 個・1 セット 200 件(`SET_LIMITS`)。
 - サーバーに結び付けるセットは 1 台に 1 つ(表 `server_set`)。「そろえる」(`sync`)は `apply` と同じく種類の合うものだけを扱い、足りないものを入れ、入っているもの(`installed_mod`)に新しい版(`latestFile` の版が記録と違う)があれば入れ直す(= 更新。古いファイルは消す)。セットに無いものは外さない。
 - 「更新を止める」(表 `server_hold`、サーバー × 配布元 × ID)。そろえる・予約・更新の確認では、止めたものを新しい版にしない(画面の「更新」は、その場の操作なので止めない)。
+- サーバーの比較(`/compare`): `catalog` の `installs` だけで表を作る(サーバーには問い合わせない)。版を選ぶときは `versions`(Modrinth・CurseForge はサーバーの種類・バージョンに合う版を新しい順に 30 個、アップロードしたものは保存した版。SpigotMC は前の版を取ってこられないので無し)。`install` に `versionId` を渡すと、その一覧にある版だけを受け付け、いちばん新しい版でなければ `server_hold` に入れる。
+- 種類(プラグイン・Mod): Modrinth は、Fabric などにも対応したプラグインを `project_type: "mod"` と返すので、ライブラリに足すときは探したときの種類、入れたときは入れたサーバーの種類で決める。
 - 「前の版に戻す」: `installInto` が更新で入れ替えた版を表 `install_history` に残す(1 つにつき 10 件)。`rollback` はいちばん新しい前の版を `fileById`(Modrinth は `/version/<ID>`、CurseForge は `/files/<ID>`、アップロードは版の行)で取り直して入れ、使った記録と戻す前の版の記録を消し、`server_hold` を付ける。SpigotMC は古い版を取ってこられないので戻せない。
-- 前提: Modrinth の版の `dependencies` のうち `required` のものを `FileChoice.deps` で返し、`installInto` がまだ入っていないものを入れる(2 段まで。入れられなくても本体はそのまま)。
+- 前提: Modrinth の版の `dependencies` のうち `required` のもの(CurseForge は `relationType: 3`)を `FileChoice.deps` で返し、同じ配布元から、`installInto` がまだ入っていないものを入れる(2 段まで。入れられなくても本体はそのまま)。
 - 「セットに無いものを外す」(`sync` の `removeExtra`)は、`installed_mod` の記録があるもの(このアプリで入れたもの)のうち、セットに無いものだけを外す。手で置いたファイルは記録が無いので触らない。予約では外さない(気づかないうちに消えないように)。
 
 - **SpigotMC**(`src/server/spiget.ts`): Spiget(SpigotMC の公開 API)で探し、Pterodactyl に `https://api.spiget.org/v2/resources/<数字の ID>/download`(Spiget の CDN へ転送される)を取り込ませる。URL はこちらで組み立てるものだけ。SpigotMC の外のサイトで配っているもの(external)・有料のもの(premium)・プラグインではないカテゴリー(Standalone・Web・DataPack)は扱わない。
@@ -112,6 +114,20 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 
 - 操作の記録(表 `audit_log`。`src/server/events.ts` の `record`)。各サービスの、変える操作の最後に記録する(だれが・何を・どのサーバーに・詳しい内容)。予約で動いたものは user_id が null。見られるのは `member: ["update"]`(管理者以上)。
 - Discord への通知(表 `team_notify`)。Webhook の URL は `seal` で暗号化して保存し、`https://discord.com/api/webhooks/…`(discordapp.com・ptb・canary を含む)だけを受け付ける。記録の種類(`EVENT_KINDS`: changes・sets・schedule・power・admin)のうち、選んだものだけを送る。`allowed_mentions` を空にしてメンションさせない。送れなくても、もとの操作は失敗させない。
+
+- ファイル比較(`/compare/files`、`files.configs`): v02 と同じ場所(一番上・plugins は 3 段・config は 4 段・mods/config は 3 段)から、開ける設定ファイルを 1 台 400 個まで集める。一覧では中身を読まず大きさで見る。開いたら全部を読み、行の差分(`src/lib/diff.ts`、Myers の方法)で基準にそろえて並べる。写すのは `files.save`(履歴に残る)。
+
+- サーバーの割り当て(表 `member_server_limit`・`member_server`): `member_server_limit` に行がある閲覧者・編集者は、`member_server` のサーバーだけを使える。確かめるのは `serverOf(deps, who, id)`(`who` は `requireTeam` の結果。チームの ID だけを渡すのは予約などの人でない操作だけ)と `needServerAccess`、一覧は `serverScope` で絞る。管理者・オーナーは制限しない。
+
+- サーバー本体(`software.ts`、表 `server_software`): 今のビルドは「入れ替えた記録(jar の大きさが同じなら)→ version_history.json → jar の名前」の順に読む。入れ替えは、今の jar を `<jar>.craftshelf-old` に名前を変えてから、同じ名前で配布元(`BUILD_HOSTS` の公式の取得先だけ)から取り込ませる。取り込めなければ名前を戻す。戻すときは 2 つの名前を入れ替える(もう一度押すと元に戻る)。
+
+- 配布元を探す(`library.identify`): このアプリの記録が無い jar を 1 回に 100 個まで読み(Pterodactyl はダウンロード用の URL から)、Modrinth の `version_files`(SHA-1)・CurseForge の `fingerprints`(`fingerprint.ts`、v02 と同じ MurmurHash2)で探す。見つかったものは `installed_mod` に記録し、ライブラリにも載せる(種類はサーバーの種類)。見つからないものは `uploads.fromServer` でアップロードしたものとして取り込める。
+
+- 変更の履歴(表 `server_change`): `installInto` が入れる・更新を、`remove` が外すを残す。外すときは消さずに `<名前>.craftshelf-removed` に名前を変える(元に戻すと名前を戻す)。更新を元に戻すのは `fileById` で前の版を取り直す(SpigotMC はできない)。1 台につき新しい 30 件までで、古いものの残したファイルも消す。セットの「セットに無いものを外す」は残さない。
+
+- バックアップ(`backup.ts`、自分用の版・PGlite だけ): PGlite の `dumpDataDir`・`secret`・`library` を `tar` でまとめ、`/data/v03/backups` に新しい 5 個を残す。戻すときは `restore-pending.tar.gz` を置いて終了し、次の起動で(データベースを開く前・鍵を読む前に)`applyPendingRestore` が入れ替える。今のデータは `before-restore-<日時>` に移し、失敗したら元に戻して `restore-failed-…` に名前を変える。
+
+- Modpack(`modpack.ts`): ファイルを持たないので、.mrpack は `modrinth.index.json` の mods/ の SHA-1 で Modrinth の版を探し(env.server が unsupported のものは飛ばす)、CurseForge は `manifest.json` の projectID を使う。名前はまとめて取り(Modrinth `/projects`・CurseForge `POST /mods`)、ライブラリに Mod として載せ、同じ名前のセットを作る。overrides は取り込まない。
 
 ## 予約
 
@@ -139,6 +155,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - 「ファイルは利用者側だけに置く」の方針に合わせ、自分用の版(利用者のサーバー機)でだけ受け付ける。サービス版では使えない(`deps.local` が無い)。
 - ライブラリの項目は `source = "upload"`(`project_id` はこのアプリが作る ID)。版は表 `library_file`(保存先・中の場所・大きさ・SHA-256・版・動くサーバーの種類)。同じ種類で名前が同じなら同じ項目の新しい版、同じ SHA-256 は 2 度入れない。
 - jar は `src/server/jar.ts` で、zip の目次から説明ファイルだけを取り出して読む(展開しない。1 ファイル 1 MB まで)。
+- 保存先のあいだで移す(`moveFiles`、管理者以上): 1 つずつ、移した先に書いて読み直し、SHA-256 が合えば `target_id` を書き換えてから元を消す。合わない・失敗したものは元に残す。
 - 保存先(表 `storage_target`。設定は `seal` で暗号化): パネルの中(既定、`/data/v03/library`)・フォルダ・WebDAV・SMB。SMB は `node-smb2`(SMB 2.0・2.1、NTLMv2 に固定)で、1 回の操作ごとにつないで切る。通信への署名・SMB 3 には対応していないので、それを必須にしている相手はマウントしてフォルダとして使う。中の場所は `<種類>/<名前>/<ID の頭>-<ファイル名>`。保存先を切り替えても、いままでのファイルは元の保存先のまま(`target_id`)。ファイルが残っている保存先は消せない。
 - サーバーへは `installInto` が、サーバーの種類に合う作り(`loaders`)のいちばん新しい版を、保存先から読んで送る。Pterodactyl は `files/upload` の署名付きの先へ multipart で送る(undici の fetch には undici の FormData を使う)。フォルダのサーバーは書き込む。
 - v02 からの取り込み(`importUploads`、ライブラリ・セットより先に行う): 配布元がわからないプラグイン・Mod を `upload` の項目にし、版は v02 の保存先のファイルをそのまま指す(コピーしない)。v02 のパネルの中(`/data`、中の場所は `library/<relpath>`)・WebDAV・SMB を v03 の保存先として登録する(使う保存先にはしない)。NFS など v03 に無い方式は飛ばす。動くサーバーの種類は v02 の `meta.loader` の表示から決める。
@@ -148,6 +165,12 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 
 - 共有リンク(表 `share_link`、自分用の版だけ): アップロードしたもののいちばん新しい版を、ログインしていない人に渡す。トークンは 24 バイトの乱数で、SHA-256 のハッシュだけを保存する(URL は作ったときにだけ返す)。期限は 1 時間〜30 日。いくつかなら圧縮しない zip(`src/server/zip.ts`)。URL は `/s/<トークン>/<ファイル名>`(wget などでも元の名前で保存されるように)。作るのは `library: ["edit"]`、一覧・削除は作った人(管理者はすべて)。
 - 利用状況(`usage`、管理者以上): ライブラリの件数(配布元ごと)・アップロードした版の数と大きさ(保存先ごと)・サーバー・入れたもの・セット・メンバー・共有リンクの数。
+
+## API と API トークン
+
+- トークンは Better Auth の apiKey(`cs_` で始まる。ハッシュだけを保存)。`metadata` にチーム(`teamId`)と「読み取りだけ」(`readOnly`)を持たせ、作った人のそのチームでの役割で動く。1 分に 120 回まで。作る・消すのはログインしてから(トークンでは作れない)。
+- 確かめるのは `src/server/guard.ts` の `requireUser`・`requireTeam`。`x-api-key` か `Authorization: Bearer cs_…` があればトークンとして確かめ(`verifyApiKey`)、役割の権限は `roles[role].authorize` で見る。読み取りだけのトークンは、権限を求める操作をすべて断る。チームを抜けた人のトークンは使えない。Better Auth の「トークンでログインしたことにする」設定は使わない。
+- 外から呼べる API(`src/server/rest.ts`、`/api/v1/…`)は、画面と同じサービスの処理を呼ぶだけ(権限の確認もそちら)。ブラウザのログインの Cookie では使わせず、トークンだけを受け付ける(ほかのサイトから呼ばれないように)。`GET /api/v1` で一覧を返す。
 
 ## これから決めること・作るもの
 

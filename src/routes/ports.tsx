@@ -4,6 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { type Group, type Kind, type Port, freePorts, isPort, rangeOf } from "~/lib/ports";
 import { adoptFoundPort, portOverview, savePortRules, saveServerPorts, scanPorts, setServerPortInfo } from "~/lib/ports-api";
 import { useCan } from "~/lib/use-can";
+import { Bell } from "~/lib/bell";
 
 export const Route = createFileRoute("/ports")({
   beforeLoad: ({ context }) => {
@@ -61,7 +62,7 @@ function Ports() {
       <header className="bar">
         <Link to="/servers" className="capsule">‹ サーバー</Link>
         <h1>ポート</h1>
-        <Bell open={bell} setOpen={setBell} count={data.problems.length + found.length}>
+        <Bell open={bell} setOpen={setBell} count={data.problems.length + found.length} label={`ポートの知らせ ${data.problems.length + found.length} 件`}>
           <ProblemList data={data} found={found} edit={edit} onChange={setData} />
         </Bell>
       </header>
@@ -139,28 +140,6 @@ function Ports() {
 }
 
 // 右上のベル: 押すと一覧が開き、外側を押すか Esc で閉じる
-function Bell({ open, setOpen, count, children }: { open: boolean; setOpen: (v: boolean) => void; count: number; children: React.ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const down = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("mousedown", down);
-    document.addEventListener("keydown", key);
-    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); };
-  }, [open]);
-  return (
-    <div className="bell-wrap" ref={ref}>
-      <button className="bell" type="button" aria-label={`ポートの知らせ ${count} 件`} aria-expanded={open} onClick={() => setOpen(!open)}>
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-        </svg>
-        {count > 0 && <span className="bell-n">{count}</span>}
-      </button>
-      {open && <div className="bell-pop group">{children}</div>}
-    </div>
-  );
-}
 
 function ProblemList({ data, found, edit, onChange }: { data: Overview; found: { s: Srv; p: Port }[]; edit: boolean; onChange: (d: Overview) => void }) {
   const save = useServerFn(saveServerPorts);
@@ -176,7 +155,7 @@ function ProblemList({ data, found, edit, onChange }: { data: Overview; found: {
         <div className="row" key={pr.portId}>
           <span className={`mono ${pr.type}`}>{pr.port}</span>
           <span className="main"><span translate="no">{name(pr.serverId)}</span><span className="muted">{pr.message}</span></span>
-          {edit && pr.fix && <button className="trail capsule small" type="button" onClick={() => run(() => save({ data: { serverId: pr.serverId, changes: [{ id: pr.portId, port: pr.fix! }] } }))}>{pr.fix} に変える</button>}
+          {edit && pr.fix && <button className="trail capsule small" type="button" onClick={() => run(() => save({ data: { serverId: pr.serverId, changes: [{ id: pr.portId, port: pr.fix! }] } }))}>{`${pr.fix} に変える`}</button>}
         </div>
       ))}
       {found.length > 0 && <div className="row"><b>見つかったポート {found.length} 件</b></div>}
@@ -199,7 +178,7 @@ function FoundRow({ server, port, kinds, edit, onAdopt, onIgnore }:
       {edit && (
         <span className="actions">
           <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="管理する種類">
-            <option value="__new">新しい種類「{port.label}」を作る</option>
+            <option value="__new">{`新しい種類「${port.label}」を作る`}</option>
             {kinds.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
           </select>
           <button className="capsule primary small" type="button" onClick={() => onAdopt(kind === "__new" ? { newKindName: port.label } : { kindId: kind })}>管理する</button>
