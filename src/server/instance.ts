@@ -18,17 +18,24 @@ import { softwareService } from "./software";
 import { backupService } from "./backup";
 import { modpackService } from "./modpack";
 import { telemetryService } from "./telemetry";
+import { teamService } from "./teams";
 
 // 置いてあるバックアップで入れ替える(データベースを開く前・鍵を読む前。自分用の版だけ)
 {
   const first = readEnv();
   if (first.mode === "self") {
-    const { applyPendingRestore } = await import("./backup");
+    const { applyPendingReimport, applyPendingRestore } = await import("./backup");
     try {
       const aside = await applyPendingRestore(first.v03Dir, first.databaseUrl);
       if (aside) console.log(`[復元] バックアップから戻しました(前のデータは ${aside})`);
     } catch (e) {
       console.error("[復元] 戻せませんでした(前のデータのまま起動します):", e);
+    }
+    try {
+      const aside = applyPendingReimport(first.v03Dir, first.databaseUrl);
+      if (aside) console.log(`[v02] 取り込み直します(v03 の前のデータは ${aside})`);
+    } catch (e) {
+      console.error("[v02] 取り込み直す用意ができませんでした:", e);
     }
   }
 }
@@ -51,7 +58,9 @@ if (env.mode === "self") {
     console.error("[v02] ライブラリの取り込みに失敗しました(v02 のデータはそのままです):", e);
   }
 }
-export const auth = createAuth(db, env);
+const { resendMailer } = await import("./mail");
+export const mailer = env.mail ? resendMailer(safeFetch, env.mail.resendKey, env.mail.from) : null;
+export const auth = createAuth(db, { ...env, mailer });
 // 自分用の版は家の中のアドレスにもつなぐ。サービス版は公開されたアドレスだけ(SSRF 対策)
 const deps = { db, auth, secret: env.secret, fetch: env.mode === "self" ? lanFetch : safeFetch, allowPrivate: env.mode === "self",
   ...(env.mode === "self" ? { local: { dataDir: env.dataDir } } : {}) };
@@ -64,6 +73,7 @@ export const files = fileService(deps);
 export const software = softwareService(deps);
 export const backups = backupService(deps);
 export const modpacks = modpackService(deps);
+export const teams = teamService(deps);
 // 利用状況の送信は、同意したパネルから v02 と同じ受け口へ(送る先へのつなぎ方はサービス版と同じ)
 export const telemetry = telemetryService({ ...deps, fetch: safeFetch });
 export const uploads = uploadService(deps);

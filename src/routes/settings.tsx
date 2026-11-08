@@ -11,6 +11,7 @@ import { createToken, listTokens, removeToken } from "~/lib/tokens-api";
 import { getLang, setLang } from "~/lib/i18n";
 import { ACCENTS, ACCENT_LABELS, type Accent, type Mode, backgroundFrom, getTheme, saveTheme } from "~/lib/theme";
 import { sendFeedback, setTelemetry, telemetryInfo } from "~/lib/telemetry-api";
+import { deleteAccount } from "~/lib/teams-api";
 
 export const Route = createFileRoute("/settings")({
   beforeLoad: ({ context }) => {
@@ -74,6 +75,7 @@ function Settings() {
       <section className="group spaced">
         <button className="row danger" type="button" onClick={logout}>ログアウト</button>
       </section>
+      <DeleteAccount />
     </main>
   );
 }
@@ -247,7 +249,7 @@ function Versions({ userId }: { userId: string }) {
         {info?.releases.map((r) => (
           <div className="row" key={r.version}>
             <span className="main">
-              <span>v{r.version}{r.version === info.current ? "(いまの版)" : ""}</span>
+              <span>v{r.version}{r.stable ? "" : "(開発版)"}{r.version === info.current ? "(いまの版)" : ""}</span>
               <span className="muted">{r.publishedAt ? new Date(r.publishedAt).toLocaleString("ja-JP") : ""}</span>
             </span>
             {r.version !== info.current && (
@@ -472,5 +474,41 @@ function Appearance() {
       </section>
       <p className="foot">見た目は、このブラウザだけに保存します(背景画像はサーバーに送りません)。</p>
     </>
+  );
+}
+
+// アカウントを消す(サービス版)。パスワードで確かめる
+function DeleteAccount() {
+  const { app } = Route.useRouteContext();
+  const remove = useServerFn(deleteAccount);
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  if (app.mode !== "service") return null;
+  return (
+    <section className="group">
+      {!open ? (
+        <button className="row link danger" type="button" onClick={() => setOpen(true)}>アカウントを消す</button>
+      ) : (
+        <>
+          <p className="row muted">アカウントを消すと、元に戻せません。自分だけのチームは一緒に消えます。ほかのメンバーがいるチームのオーナーは、先にオーナーを譲るか、チームを消してください。</p>
+          <input className="row" type="password" autoComplete="current-password" placeholder="確かめのためのパスワード" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <button className="row danger" type="button" disabled={busy || !password} onClick={async () => {
+            if (!confirm("アカウントを消しますか?元に戻せません")) return;
+            setBusy(true);
+            setError("");
+            try {
+              await remove({ data: { password } });
+              location.href = "/login";
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "うまくいきませんでした");
+              setBusy(false);
+            }
+          }}>{busy ? "消しています…" : "アカウントを消す"}</button>
+        </>
+      )}
+      {error && <p className="row error" role="alert">{error}</p>}
+    </section>
   );
 }

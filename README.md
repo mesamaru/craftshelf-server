@@ -26,9 +26,13 @@ npm run e2e        # ブラウザでの通しの確認(ビルドしたサーバ�
    - `POSTGRES_PASSWORD`: データベースのパスワード
    - `TUNNEL_TOKEN`: Cloudflare Zero Trust →「Networks」→「Tunnels」で作ったトンネルのトークン。トンネルの公開先は `http://app:3000` にします
    - `COMPOSE_FILE=docker-compose.service.yml`: サービス版の構成を使います(`docker-compose.yml` は自分用の版の構成です)
+   - `RESEND_API_KEY`・`MAIL_FROM`: メールの送信(Resend)。設定すると、登録した人はメールアドレスを確かめるまでログインできず、パスワードの再設定・招待のメールも送ります。公開するときは設定してください
 2. `docker compose up -d --build`
 
 app のポートは外に出しません。入口は Cloudflare Tunnel だけです(家のポートを開けず、IP も知られません)。
+
+- **見張り**: `GET /api/health` が、データベースまで答えられるかを返します(`{"ok":true}`。ログインは要りません)。外からの見張りに使えます
+- **利用規約・プライバシーポリシー**: `/terms`・`/privacy` はひな形です。公開する前に、運営者が中身を確かめて直してください
 
 ## バックアップ
 

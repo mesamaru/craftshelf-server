@@ -29,6 +29,9 @@ function storedSecret(dir: string): string {
   return s;
 }
 
+/** v02 のデータ(index.db・secret.key)の場所。v02 と同じく CONFIG_DIR・DB_DIR があればそちら */
+export const v02DirOf = (dataDir: string) => process.env.V02_CONFIG_DIR || process.env.CONFIG_DIR || process.env.DB_DIR || dataDir;
+
 export function readEnv() {
   const mode: Mode = process.env.CRAFTSHELF_MODE === "service" ? "service" : "self";
   const dataDir = process.env.DATA_DIR || (isProd ? "/data" : "./.data");
@@ -45,7 +48,7 @@ export function readEnv() {
     dataDir,
     v03Dir,
     // v02 のデータ(index.db・secret.key)の場所。v02 と同じく CONFIG_DIR・DB_DIR があればそちら
-    v02Dir: process.env.V02_CONFIG_DIR || process.env.CONFIG_DIR || process.env.DB_DIR || dataDir,
+    v02Dir: v02DirOf(dataDir),
     appUrl,
     secret,
     databaseUrl: process.env.DATABASE_URL || (service && isProd ? need("DATABASE_URL") : `pglite:${join(v03Dir, "pg")}`),
@@ -53,6 +56,8 @@ export function readEnv() {
     // 利用者の IP を入れてくるヘッダー(Cloudflare Tunnel なら cf-connecting-ip)。
     // アプリに直接つなげない構成のときだけ設定する(直接つなげると書き換えられる)
     clientIpHeader: process.env.CLIENT_IP_HEADER || "",
+    // メールの送信(Resend)。両方あるときだけ送る
+    mail: process.env.RESEND_API_KEY && process.env.MAIL_FROM ? { resendKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM } : null,
   };
 }
 
