@@ -17,3 +17,15 @@ export const deleteTeam = createServerFn({ method: "POST" })
 export const deleteAccount = createServerFn({ method: "POST" })
   .validator(z.object({ password: z.string().max(200) }))
   .handler(async ({ data }) => (await svc()).deleteAccount(headers(), data.password));
+
+export const resetSignIn = createServerFn({ method: "POST" })
+  .validator(z.object({ userId: z.string().min(1).max(64), what: z.enum(["twoFactor", "passkeys"]) }))
+  .handler(async ({ data }) => (await svc()).resetSignIn(headers(), data.userId, data.what));
+
+export const myPermissions = createServerFn({ method: "GET" }).handler(async () => (await svc()).myPerms(headers()));
+
+export const memberGrants = createServerFn({ method: "GET" }).handler(async () => (await svc()).memberGrants(headers()));
+
+export const setMemberGrants = createServerFn({ method: "POST" })
+  .validator(z.object({ userId: z.string().min(1).max(64), perms: z.array(z.string().max(40)).max(20) }))
+  .handler(async ({ data }) => (await svc()).setMemberGrants(headers(), data.userId, data.perms));

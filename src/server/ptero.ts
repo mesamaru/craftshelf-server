@@ -8,11 +8,14 @@ export class PteroError extends Error {}
 export type RemoteServer = { identifier: string; name: string; node: string; description: string };
 export type RemoteFile = { name: string; size: number; isFile: boolean; modifiedAt: string };
 export type Allocation = { ip: string; alias: string; port: number; notes: string; isDefault: boolean };
+// パネルのバックアップ(サーバー全体。Wings が作り、パネルの置き場所に残す)
+export type RemoteBackup = { uuid: string; name: string; bytes: number; createdAt: string; completedAt: string | null; successful: boolean; locked: boolean };
 export type Resources = { state: string; cpu: number | null; memory: number | null; disk: number | null; uptime: number | null };
 export const POWER_SIGNALS = ["start", "stop", "restart", "kill"] as const;
 export type PowerSignal = (typeof POWER_SIGNALS)[number];
 
 const IDENT = /^[a-z0-9-]{1,64}$/i;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function pteroClient(baseUrl: string, apiKey: string, fetch: FetchLike) {
   // body が文字列なら、そのまま送る(ファイルの書き込み)。それ以外は JSON
@@ -107,6 +110,16 @@ export function pteroClient(baseUrl: string, apiKey: string, fetch: FetchLike) {
         ip: String(a.ip ?? ""), alias: String(a.ip_alias ?? ""), port: Number(a.port ?? 0), notes: String(a.notes ?? ""), isDefault: !!a.is_default,
       })).filter((a: Allocation) => Number.isInteger(a.port) && a.port > 0);
     },
+    // egg の名前と起動の変数(MINECRAFT_VERSION・SERVER_JARFILE など)。サーバーの種類を推し量るのに使う
+    async details(ident: string): Promise<{ egg: string; vars: Record<string, string> }> {
+      const a = (await (await req("GET", srv(ident) + "?include=egg,variables")).json())?.attributes ?? {};
+      const vars: Record<string, string> = {};
+      for (const v of a.relationships?.variables?.data ?? []) {
+        const x = v?.attributes ?? {};
+        if (typeof x.env_variable === "string") vars[x.env_variable] = String(x.server_value ?? x.default_value ?? "").slice(0, 200);
+      }
+      return { egg: String(a.relationships?.egg?.attributes?.name ?? "").slice(0, 100), vars };
+    },
     // テキストのファイルを読む(無ければ null)
     async readFile(ident: string, file: string): Promise<string | null> {
       const res = await req("GET", srv(ident) + `/files/contents?file=${encodeURIComponent(file)}`, undefined, [200, 404]);
@@ -153,7 +166,52 @@ export function pteroClient(baseUrl: string, apiKey: string, fetch: FetchLike) {
     async rename(ident: string, root: string, from: string, to: string) {
       await req("PUT", srv(ident) + "/files/rename", { root, files: [{ from, to }] });
     },
+    // パネルのバックアップ(Pterodactyl だけ。フォルダのサーバー・エージェントには無い)
+    backups: {
+      async list(ident: string): Promise<RemoteBackup[]> {
+        const out: RemoteBackup[] = [];
+        for (let page = 1; page <= 20; page++) {
+          const d = await (await req("GET", srv(ident) + `/backups?page=${page}&per_page=50`)).json();
+          for (const x of d?.data ?? []) {
+            const a = x?.attributes ?? {};
+            if (typeof a.uuid !== "string" || !UUID.test(a.uuid)) continue;
+            out.push({ uuid: a.uuid, name: String(a.name ?? ""), bytes: Number(a.bytes ?? 0), createdAt: String(a.created_at ?? ""),
+              completedAt: a.completed_at ? String(a.completed_at) : null, successful: !!a.is_successful, locked: !!a.is_locked });
+          }
+          if (page >= Number(d?.meta?.pagination?.total_pages ?? 1)) break;
+        }
+        return out;
+      },
+      async create(ident: string, name: string) {
+        try {
+          await req("POST", srv(ident) + "/backups", { name });
+        } catch (e) {
+          // 上限(サーバーごとのバックアップの数)に達していると 400 が返る
+          if (e instanceof PteroError && /HTTP 400/.test(e.message)) throw new PteroError("Pterodactyl のバックアップの数が上限に達しています(残す数を減らすか、パネルで古いものを消してください)");
+          throw e;
+        }
+      },
+      // ダウンロード用の URL(Wings の、しばらくだけ使える署名付きのもの)
+      async url(ident: string, uuid: string): Promise<string> {
+        if (!UUID.test(uuid)) throw new PteroError("バックアップの ID が正しくありません");
+        const d = await (await req("GET", srv(ident) + `/backups/${uuid}/download`)).json();
+        const url = String(d?.attributes?.url ?? "");
+        if (!/^https?:\/\//.test(url)) throw new PteroError("Pterodactyl からダウンロード先を受け取れませんでした");
+        return url;
+      },
+      // バックアップから戻す(パネルがサーバーを止めて展開する)。truncate なら、今のファイルを消してから戻す
+      async restore(ident: string, uuid: string, truncate: boolean) {
+        if (!UUID.test(uuid)) throw new PteroError("バックアップの ID が正しくありません");
+        await req("POST", srv(ident) + `/backups/${uuid}/restore`, { truncate });
+      },
+      async remove(ident: string, uuid: string) {
+        if (!UUID.test(uuid)) throw new PteroError("バックアップの ID が正しくありません");
+        await req("DELETE", srv(ident) + `/backups/${uuid}`);
+      },
+    },
   };
 }
 
-export type PteroClient = ReturnType<typeof pteroClient>;
+// ファイル・コマンドなど、フォルダのサーバー・エージェントも同じ形で持つ操作(バックアップは Pterodactyl だけ)
+export type PteroClient = Omit<ReturnType<typeof pteroClient>, "backups" | "details">;
+export type PteroBackups = ReturnType<typeof pteroClient>["backups"];

@@ -20,6 +20,8 @@ const versionOf = () => {
     return "";
   }
 };
+// 配り方(v02 の受け口と同じ値。インストーラー版・install.sh はランチャーが CRAFTSHELF_DIST で渡す)
+const modeOf = () => (["installer", "script"].includes(process.env.CRAFTSHELF_DIST ?? "") ? process.env.CRAFTSHELF_DIST : existsSync("/.dockerenv") ? "docker" : "source");
 const osOf = () => ({ linux: "linux", win32: "windows", darwin: "macos" })[process.platform as string] ?? "other";
 export const FEEDBACK_KINDS = ["request", "bug", "question", "other"] as const;
 
@@ -57,7 +59,7 @@ export function telemetryService(deps: Deps) {
     };
     const kinds = new Set((await db.selectDistinct({ k: storageTarget.kind }).from(storageTarget)).map((r) => r.k));
     return {
-      install_id: s.installId, version: versionOf(), channel: "dev", os: osOf(), arch: process.arch, mode: existsSync("/.dockerenv") ? "docker" : "source", lang: "ja",
+      install_id: s.installId, version: versionOf(), channel: "dev", os: osOf(), arch: process.arch, mode: modeOf(), lang: "ja",
       items: bucket(await n(all(libraryItem))), users: bucket(await n(all(user))), servers: bucket(await n(all(server))), sets: bucket(await n(all(addonSet))),
       storage: ["local", ...[...kinds].filter((k) => k === "smb" || k === "webdav")].sort(),
       features: Object.keys(features).filter((k) => features[k]).sort(),
@@ -76,14 +78,14 @@ export function telemetryService(deps: Deps) {
   return {
     /** 送るかどうかの設定と、送る内容(管理者以上) */
     async info(headers: Headers) {
-      await requireTeam(auth, headers, { member: ["update"] });
+      await requireTeam(auth, headers, { panel: ["manage"] });
       const s = read();
       return { available: !!telemetryUrl() && !!deps.local, enabled: s.enabled === true, asked: s.enabled !== null, lastSent: s.lastSent, preview: await payload() };
     },
 
     /** 送るかどうかを決める(管理者以上)。送ると決めたら、すぐに 1 回送る */
     async set(headers: Headers, enabled: boolean) {
-      const who = await requireTeam(auth, headers, { member: ["update"] });
+      const who = await requireTeam(auth, headers, { panel: ["manage"] });
       if (!deps.local) throw new HttpError(400, "自分用の版だけで使えます");
       write({ ...read(), enabled });
       await record({ teamId: who.teamId, userId: who.user.id, kind: "admin", action: enabled ? "利用状況の送信をオンにする" : "利用状況の送信をオフにする" });
@@ -107,7 +109,7 @@ export function telemetryService(deps: Deps) {
       const kind = (FEEDBACK_KINDS as readonly string[]).includes(input.kind) ? input.kind : "other";
       const body = {
         kind, message, contact: String(input.contact ?? "").trim().slice(0, 200),
-        ...(input.includeEnv ? { version: versionOf(), os: osOf(), mode: existsSync("/.dockerenv") ? "docker" : "source" } : {}),
+        ...(input.includeEnv ? { version: versionOf(), os: osOf(), mode: modeOf() } : {}),
       };
       let res: Response;
       try {

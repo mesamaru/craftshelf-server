@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { Link, createFileRoute, redirect } from "@tanstack/react-router";
 import { authClient } from "~/lib/auth-client";
 import { errorText } from "~/lib/errors";
+import { filesAccess, setEditorFiles } from "~/lib/files-api";
 import { curseforgeKey, setCurseforgeKey } from "~/lib/library-api";
 import { useCan } from "~/lib/use-can";
 import { useServerFn } from "@tanstack/react-start";
-import { ASSIGNABLE_ROLES, type RoleName, roleLabel } from "~/lib/permissions";
+import { ASSIGNABLE_ROLES, GRANTS, GRANT_LABELS, type Grant, type RoleName, roleLabel } from "~/lib/permissions";
 import { serverAssignments, setServerAssignment } from "~/lib/servers-api";
-import { deleteTeam, transferOwner } from "~/lib/teams-api";
+import { deleteTeam, memberGrants, resetSignIn, setMemberGrants, transferOwner } from "~/lib/teams-api";
 
 export const Route = createFileRoute("/team")({
   beforeLoad: ({ context }) => {
@@ -40,6 +41,7 @@ function Team() {
                 removable={m.role !== "owner" && m.userId !== user.id && can({ member: ["delete"] })} onDone={refetch} />
             ))}
           </section>
+          {can({ member: ["update"] }) && <Grants key={team.members.map((m) => m.role).join()} me={user.id} members={team.members.map((m) => ({ userId: m.userId, name: m.user.name, role: m.role }))} />}
           {can({ member: ["update"] }) && <Assignments key={team.members.map((m) => m.role).join()} />}
           {can({ invitation: ["create"] }) && <Invite onDone={refetch} />}
           {team.invitations.some((i) => i.status === "pending") && (
@@ -53,16 +55,20 @@ function Team() {
               </section>
             </>
           )}
-          {can({ member: ["update"] }) && (
+          {(can({ member: ["update"] }) || can({ audit: ["read"] }) || can({ integrations: ["manage"] }) || (app.mode === "self" && can({ storage: ["manage"] }))) && (
             <section className="group">
-              <Link to="/activity" className="row link">操作の記録と Discord への通知</Link>
-              {app.mode === "self" && <Link to="/storage" className="row link">保存先(アップロードしたアドオンの置き場所)</Link>}
-              <Link to="/usage" className="row link">利用状況</Link>
-              {app.mode === "self" && <Link to="/backup" className="row link">バックアップ</Link>}
+              {(can({ audit: ["read"] }) || can({ integrations: ["manage"] })) && <Link to="/activity" className="row link">操作の記録と Discord への通知</Link>}
+              {app.mode === "self" && can({ storage: ["manage"] }) && <Link to="/storage" className="row link">保存先(アップロードしたアドオンの置き場所)</Link>}
+              {can({ member: ["update"] }) && <Link to="/usage" className="row link">利用状況</Link>}
+              {app.mode === "self" && can({ member: ["update"] }) && <Link to="/backup" className="row link">バックアップ</Link>}
             </section>
           )}
           {app.mode === "self" && <section className="group"><Link to="/shares" className="row link">共有リンク</Link></section>}
-          {app.mode === "self" && can({ member: ["update"] }) && <CurseForgeKey />}
+          {can({ member: ["update"] }) && <EditorFiles />}
+          {app.mode === "self" && can({ integrations: ["manage"] }) && <CurseForgeKey />}
+          {app.mode === "self" && can({ member: ["update"] }) && (
+            <SignInHelp members={team.members.filter((m) => m.role !== "owner" && m.userId !== user.id).map((m) => ({ userId: m.userId, name: m.user.name }))} />
+          )}
           {me && me.role !== "owner" && <Leave teamId={team.id} />}
           {me?.role === "owner" && (
             <OwnerTools teamName={team.name} service={app.mode === "service"}
@@ -149,7 +155,7 @@ function MemberRow({ member, isMe, editable, removable, onDone }:
   return (
     <div className="row member">
       <span className="main">
-        <span translate="no">{member.user.name}{isMe ? "(自分)" : ""}</span>
+        <span><span translate="no">{member.user.name}</span>{isMe ? "(自分)" : ""}</span>
         <span className="muted" translate="no">{member.user.email}</span>
         {error && <span className="error" role="alert">{error}</span>}
       </span>
@@ -283,6 +289,96 @@ function CurseForgeKey() {
   );
 }
 
+// 設定ファイルを編集者にも許すか(管理者以上が決める。既定は管理者以上だけ)
+function EditorFiles() {
+  const load = useServerFn(filesAccess);
+  const save = useServerFn(setEditorFiles);
+  const [on, setOn] = useState<boolean | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { load().then((a) => setOn(a.editors), (e) => setError(cfMessage(e))); }, []);
+  const change = async (v: boolean) => {
+    setError("");
+    setOn(v);
+    try {
+      await save({ data: { on: v } });
+    } catch (e) {
+      setOn(!v);
+      setError(cfMessage(e));
+    }
+  };
+  if (on === null && !error) return null;
+  return (
+    <>
+      <div className="group-title">設定ファイル</div>
+      <section className="group">
+        <label className="row">
+          <span>編集者にも、サーバーの設定ファイルを見る・直すのを許す</span>
+          <input className="trail" type="checkbox" checked={!!on} disabled={on === null} onChange={(e) => change(e.target.checked)} />
+        </label>
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">設定ファイル(server.properties・plugins の設定など)には、データベースのパスワードや API キーが入っていることがあります。既定では管理者とオーナーだけが見る・直せます。許すと、編集者も「ファイルとコマンド」とファイル比較で見る・直せるようになります(割り当てたサーバーだけ)。人ごとに許す・止めるときは「メンバーごとの権限」で決めます。</p>
+    </>
+  );
+}
+
+// メンバーごとの権限(管理者以上・03.60.00 から): 役割の権限に足す・引く。オーナーと自分は変えられない
+function Grants({ members, me }: { members: { userId: string; name: string; role: string }[]; me: string }) {
+  const load = useServerFn(memberGrants);
+  const save = useServerFn(setMemberGrants);
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof memberGrants>> | null>(null);
+  const [open, setOpen] = useState("");
+  const [error, setError] = useState("");
+  const reload = () => load().then(setRows, (e) => setError(cfMessage(e)));
+  useEffect(() => { reload(); }, []);
+  const list = members.filter((m) => m.userId !== me && rows?.some((r) => r.userId === m.userId && !r.owner));
+  if (!rows || !list.length) return error ? <p className="error" role="alert">{error}</p> : null;
+  const change = async (userId: string, perms: Grant[]) => {
+    setError("");
+    setRows((d) => d && d.map((x) => (x.userId === userId ? { ...x, perms } : x))); // 先に画面を変える
+    try {
+      await save({ data: { userId, perms } });
+    } catch (e) {
+      setError(cfMessage(e));
+    }
+    await reload();
+  };
+  return (
+    <>
+      <div className="group-title">メンバーごとの権限</div>
+      {list.map((m) => {
+        const r = rows.find((x) => x.userId === m.userId)!;
+        const more = r.perms.filter((g) => !r.base.includes(g)).length;
+        const less = r.base.filter((g) => !r.perms.includes(g)).length;
+        return (
+          <section className="group" key={m.userId}>
+            <div className="row">
+              <span className="main">
+                <span translate="no">{m.name}</span>
+                <span className="muted small">{roleLabel(m.role)} · {more || less ? `足した権限 ${more}・引いた権限 ${less}` : "役割のとおり"}</span>
+              </span>
+              <button className="trail link" type="button" aria-expanded={open === m.userId} onClick={() => setOpen(open === m.userId ? "" : m.userId)}>{open === m.userId ? "閉じる" : "変える"}</button>
+            </div>
+            {open === m.userId && GRANTS.map((g) => (
+              <label className="row" key={g}>
+                <span className="main">
+                  <span>{GRANT_LABELS[g]}</span>
+                  {r.perms.includes(g) !== r.base.includes(g) && <span className="muted small">{r.perms.includes(g) ? "役割より多い(足した権限)" : "役割より少ない(引いた権限)"}</span>}
+                </span>
+                <input className="trail" type="checkbox" checked={r.perms.includes(g)} aria-label={GRANT_LABELS[g]}
+                  onChange={(e) => change(m.userId, e.target.checked ? [...r.perms, g] : r.perms.filter((x) => x !== g))} />
+              </label>
+            ))}
+            {open === m.userId && (more > 0 || less > 0) && <button className="row link" type="button" onClick={() => change(m.userId, r.base as Grant[])}>役割のとおりに戻す</button>}
+          </section>
+        );
+      })}
+      {error && <p className="error" role="alert">{error}</p>}
+      <p className="foot">役割(閲覧者・編集者・管理者)の権限に、メンバーごとに足したり引いたりできます。たとえば「編集者だけど設定ファイルも直せる」「閲覧者だけどサーバーの電源は操作できる」「編集者だけどライブラリは変えられない」のようにできます。チームの設定の「編集者にも設定ファイルを許す」は、編集者みんなの既定です(ここで人ごとに足し引きできます)。メンバーの招待・役割の変更・チームの設定・利用状況・パネルのバックアップは、役割(管理者以上)だけで決まります。オーナーの権限は減らせません。API トークンも、作った人の今の権限の分だけ使えます。</p>
+    </>
+  );
+}
+
 // サーバーの割り当て(管理者以上): 閲覧者・編集者ごとに、使えるサーバーを決める。管理者・オーナーはいつでもすべて
 function Assignments() {
   const load = useServerFn(serverAssignments);
@@ -375,6 +471,47 @@ function OwnerTools({ teamName, service, members }: { teamName: string; service:
         </section>
       )}
       {error && <p className="error" role="alert">{error}</p>}
+    </>
+  );
+}
+
+// ログインできなくなったメンバー(自分用の版・管理者以上): 二段階認証を外す・パスキーをすべて消す。
+// サービス版では出さない(理由は src/server/teams.ts の resetSignIn)
+function SignInHelp({ members }: { members: { userId: string; name: string }[] }) {
+  const reset = useServerFn(resetSignIn);
+  const [to, setTo] = useState("");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  if (!members.length) return null;
+  const run = async (what: "twoFactor" | "passkeys", ask: string) => {
+    const name = members.find((m) => m.userId === to)?.name ?? "";
+    if (!confirm(`${name} さんの${ask}`)) return;
+    setError("");
+    setNote("");
+    try {
+      const r = await reset({ data: { userId: to, what } });
+      setNote(r.removed ? "外しました。その人はログインし直しになります" : "設定されていませんでした");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "うまくいきませんでした");
+    }
+  };
+  return (
+    <>
+      <div className="group-title">ログインできなくなったメンバー</div>
+      <section className="group">
+        <div className="row">
+          <span>メンバー</span>
+          <select className="trail" value={to} onChange={(e) => setTo(e.target.value)} aria-label="ログインできなくなったメンバー">
+            <option value="">選んでください…</option>
+            {members.map((m) => <option key={m.userId} value={m.userId} translate="no">{m.name}</option>)}
+          </select>
+        </div>
+        <button className="row link danger" type="button" disabled={!to} onClick={() => run("twoFactor", "二段階認証を外しますか?(パスワードだけでログインできるようになります)")}>二段階認証を外す</button>
+        <button className="row link danger" type="button" disabled={!to} onClick={() => run("passkeys", "パスキーをすべて消しますか?")}>パスキーをすべて消す</button>
+        {note && <p className="row muted" role="status">{note}</p>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">本人が端末をなくしたときに使います。外すと、その人のいまのログインもすべて切れます。操作は記録に残ります。オーナーの設定は変えられません。</p>
     </>
   );
 }

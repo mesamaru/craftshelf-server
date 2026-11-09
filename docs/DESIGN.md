@@ -40,6 +40,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 ## 決まりごと
 
 - **データベースの変更は「足すだけ」**: 表・項目を消したり、名前や意味を変えたりしない。`npm run db:generate` で `drizzle/` に移行の SQL を足し、起動したときに流す。
+- 本番のビルドでは `instance.ts` が 2 つの束(サーバーの関数 / サーバーのルートと起動時の処理)に別々に入る。データベース(`createDb`)とエージェントの列(`hub`)は `globalThis` でプロセスに 1 つにする(03.56.00 から。PGlite を 2 回開くと、互いの書き込みが見えない)。
 - 認証の表(`src/server/db/auth-schema.ts`)は `npm run auth:schema` で作る。Better Auth の設定(プラグイン)を変えたら作り直し、続けて `npm run db:generate`。
 - サーバーだけで動く処理は `src/server/` に置き、画面からは `createServerFn` かサーバーのルート(`src/routes/api/`)を通して使う。認証の確認は、画面の `beforeLoad` だけでなく、サーバー側の処理ごとに必ず行う。
 - 利用者の IP は、Cloudflare Tunnel が付ける `cf-connecting-ip` を使う(`CLIENT_IP_HEADER`)。app のポートを外に出さない構成のときだけ信頼できる。
@@ -57,6 +58,8 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 | 閲覧者 | 見るだけ |
 
 - サーバー側の処理では `requireTeam(auth, headers, { server: ["control"] })` のように、選んでいるチームでの権限を必ず確かめる(`src/server/guard.ts`)。
+- 権限の種類(`statements`): Better Auth の `member`・`invitation`・`organization` などに加えて、`server`(create・update・delete・control)・`library`(edit)と、03.60.00 から `files`(edit。設定ファイル)・`audit`(read。操作の記録)・`storage`(manage。保存先)・`integrations`(manage。Discord への通知・CurseForge のキー)・`panel`(manage。版の切り替え・自動アップデート・利用状況の送信)。管理者・オーナーはすべて、編集者は `server:control`・`library:edit`、閲覧者は無し。利用状況・パネルのバックアップ・サーバーの割り当て・チームの既定などは `member:update`(管理者以上)のまま。
+- メンバーごとの権限(03.60.00 から。v02 の `users.perms`): 表 `member_perm`(Better Auth の `member` ごと。外部キーでチームから外すと消え、ほかのチームには効かない)の `allow`・`deny`(`"server:control"` の形の JSON の配列)。できることは `permsOf(役割, { allow, deny, editorFiles })` = 役割の権限 + チームの「編集者にも設定ファイル」(`team_option.editor_files`。編集者だけの既定)+ allow − deny。足し引きできるのは `GRANTS`(`library:edit`・`server:*`・`files:edit`・`audit:read`・`storage:manage`・`integrations:manage`・`panel:manage`)だけ。`member`・`invitation`・`organization` は Better Auth が自分の処理(招待・役割の変更・チームの名前)で役割だけを見て確かめるので、足し引きさせない(役割で決まる)。オーナーは足し引きを見ない(減らせない)。`requireTeam` は Better Auth の `hasPermission` の代わりに `memberPerms`(役割・足し引き・チームの設定を 1 回で読む。`auth.appDb` を使う)で確かめ、API トークンもトークンの範囲に加えて、作った人の今の権限で確かめる。決めるのは `teams.setMemberGrants`(`member:update`・ログインしてから・オーナーと自分は不可。持たせるものの一覧を受け取り、役割より多いものを allow、少ないものを deny に覚える)。画面の `useCan` は `myPerms` を読み(読み終わるまでは役割で決める)、チームの画面の「メンバーごとの権限」で人ごとに決める。v02 の権限は `maybeImportV02Perms` が一度だけ `V02_PERMS` の表(storage → storage:manage・audit → audit:read・integrations → integrations:manage・system → panel:manage・users は対応なし)で allow に置き換える(結果は `/data/v03/import-v02-perms.json`。v03 で決めた人は上書きしない)。
 - 招待はリンクで渡す(メールの送信は、送信サービスを決めてから足す)。招待されたメールアドレスでログインした人だけが参加できる。
   - メールアドレスの確認はまだ無いので、招待のリンクを知っている人が、そのアドレスで先に登録すると参加できてしまう。メールの送信を足すときに、確認を必須にする。
 - 無料の上限: 1 人が作れるチームは 5 つ、1 チームの人数は 20 人(`src/server/auth.ts` の `LIMITS`)。
@@ -86,10 +89,21 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 
 ## ライブラリ(チームの目録)
 
-- チームで使う Mod・プラグインの一覧(表 `library_item`)。**ファイルは持たず**、配布元のプロジェクト(いまは Modrinth)だけを記録する。サーバーに入れたものは自動で載る。
+- チームで使う Mod・プラグインの一覧(表 `library_item`)。ふだんは**ファイルを持たず**、配布元のプロジェクトだけを記録する(03.61.00 から、自分用の版は配布元のファイルを保存先に保存することもできる。下の「配布元のファイルの保存」)。サーバーに入れたものは自動で載る。
 - 画面(トップ)では、それぞれがどのサーバーにどの版で入っているか(`installed_mod` から)を出し、種類が合うサーバー(プラグインなら plugins/ を使うサーバー)を選んで入れられる。
-- 足すのは `library: ["edit"]`(編集者以上)。プラグインと Mod だけ。外してもサーバーのファイルは消さない。無料の上限は 1 チーム 500 件(`LIBRARY_LIMITS`)。
-- v02 からの取り込み(`maybeImportV02Library`、結果は `/data/v03/import-v02-library.json`): v02 から移った自分用の版で一度だけ。配布元が Modrinth(ID が 8 文字)とわかるプラグイン・Mod と、SpigotMC(数字の ID)とわかるプラグインだけを載せ、v02 のセットも作る(版の固定は引き継がない)。アップロードしただけのファイル・CurseForge・データパックは、名前を結果に残して飛ばす。
+- 足すのは `library: ["edit"]`(編集者以上)。種類(`project_type`、`ITEM_TYPES`)はプラグイン・Mod と、03.58.00 からデータパック・リソースパック・シェーダー・Modパック(v02 と同じ)。外してもサーバーのファイルは消さない。無料の上限は 1 チーム 500 件(`LIBRARY_LIMITS`)。
+- データパック(03.58.00 から): ワールドのあるサーバー(プロキシ以外、`kindsOf`)の `<level-name>/datapacks/`(`server.properties` を `worldOf` で読む)に .zip を置く。サーバーにあるファイルの種類は拡張子で決める(.jar = サーバーの種類のフォルダ、.zip = datapacks。`fileProfile`)。入れる・更新・無効・外す・元に戻す・配布元を探す・そろえる・セット・更新の確認は、どれも `Profile.kind = "datapack"` で同じ処理を通る(Modrinth は作り `datapack` の版だけ、CurseForge は分類 6945)。どの種類として入れるかは、`kind` → サーバーに入っているファイル → ライブラリの種類の順に決める(`targetProfile`)。データパックの前提は配布元に問い合わせない。
+- リソースパック・シェーダーはクライアントで使うので、サーバーには入れない(v02 と同じ)。ライブラリで持ち、版の一覧から配布元の CDN のファイルをダウンロードできる(アップロードしたものは保存先から・共有リンクも)。アップロードは .zip・.mrpack も受け付け、中身(pack.mcmeta と data/ か assets/・shaders/・modrinth.index.json・manifest.json)で種類を決める(`analyzePack`)。
+- Modパック(03.58.00 から): アイテムとして持ち、`modpackService.fromItem` が受け取る版のとおりのいちばん新しい版(配布元の CDN から、転送は CDN の中だけ・100 MB まで)か、アップロードしたいちばん新しいファイルを読んで、`import` と同じくセットを作る。サーバーを選ぶと overrides を書き込み(`server: ["update"]`)、セットも入れる。使った版は `library_item.pack` に覚え、`refreshInfo` がいちばん新しい版を取り直して、使った版より新しければ一度だけ「新しい版」の種類で知らせる。
+- タグ(表 `library_tag`、チームの中で共有。付け外しは `library: ["edit"]`、1 つ 30 文字・1 件に 20 個まで)とお気に入り(表 `library_favorite`、利用者ごと。閲覧者もできる。一覧の上に並べる)。
+- 一覧の絞り込み(名前・種類・配布元・タグ)と並べ替え(名前・追加日)は画面の中だけで行う。「更新あり」は押したときだけ `outdated` が配布元に問い合わせる(サーバーの種類とバージョンごとに 1 回。更新を止めたもの・割り当てのないサーバーは見ない)。まとめて操作(タグ・セットに足す・外す)は、選んだものに 1 件ずつ同じ処理を呼ぶ(タグだけは 1 回で付ける)。
+- 前提の確かめ(03.56.00 から。`modTools.missingOf` をセット・ライブラリ・サーバーで共有): 前提は、配布元の必須(Modrinth・CurseForge の、そのサーバーに入るいちばん新しい版の `deps`)と、手で決めた前提(表 `library_dep`、アイテム → 前提のアイテム。配布元が前提を知らない SpigotMC・アップロードしたものにも使える。`linkDep` は `library: ["edit"]`)。ライブラリの「前提が足りない」(`missingDeps`)は押したときだけ配布元に問い合わせ、アイテムの「詳しく」(`missingDeps(itemId)`)とサーバーの画面(`serverDeps`、開いたとき)は自動で確かめる。足りないものは `install` でそのサーバーに入れる。無効にしたものは入っていないものとみなす。
+- 配布元の変更内容(`itemVersions`・`itemChangelog`): Modrinth は `/project/<ID>/version`(30 個)と `/version/<ID>` の `changelog`(Markdown の文のまま)、CurseForge は `/files` と `/files/<ID>/changelog`(HTML を `html-text.ts` で文字にする)、SpigotMC は版ごとの変更内容が無いので、更新のお知らせ(`/resources/<ID>/updates`、base64 の HTML を文字にする)を版の代わりにする。画面ではいつも文字として出す(HTML として描かない)。
+- アイテムの情報を直す(`editItem`・`relinkItem`、`member: ["update"]`): 種類・動く作り(`library_item.loaders`)・対応 MC(`mc_versions`)・受け取る版(`channel`)。どれも "" = 直していない。動く作りを直すと、配布元に問い合わせるときの loaders にそれを使い、対応 MC がサーバーのバージョンを含むなら MC のバージョンでは絞らない(`pickOf`)。付け替えは URL で別のプロジェクトにし、チームのサーバーの `installed_mod`・`server_hold` の配布元と ID も付け替える(次の更新で新しいプロジェクトの版に入れ替わる)。アップロードしたものは付け替えない。
+- 対応 MC(`library_item.upstream_mc`・`info_at`): 1 分ごとの `refreshInfo` が、取ってから 1 日たったものを 50 件ずつ取り直す(Modrinth は `/projects` の `game_versions`、CurseForge は `latestFilesIndexes`、SpigotMC は `testedVersions`、アップロードは jar から読んだもの。スナップショットは除く)。一覧は直したもの、無ければこれを出し、MC のバージョンで絞り込める(1.20 は 1.20.x を含む)。
+- 受け取る版(`channel`): release = 正式版だけ(正式版が無いものだけベータ)/ all = ベータ・アルファも含めていちばん新しいもの。チームの既定は `team_option.channel`(管理者以上)、アイテムごとに変えられる。v02 の `stable_only`・`item_sources.channel` は `maybeImportV02Channels` で一度だけ引き継ぐ。
+- URL から足す(`addFromUrl`): Modrinth(slug でも)・SpigotMC・CurseForge(slug を `/mods/search?slug=` で ID に)のページの URL を読む(`parseSourceUrl`)。Hangar はまだ配布元に無いので断る。
+- v02 からの取り込み(`maybeImportV02Library`、結果は `/data/v03/import-v02-library.json`): v02 から移った自分用の版で一度だけ。配布元が Modrinth(ID が 8 文字)とわかるプラグイン・Mod と、SpigotMC(数字の ID)とわかるプラグインだけを載せ、v02 のセットも作る(版の固定は、03.59.00 から `maybeImportV02Pins` が一度だけ引き継ぐ。下の「セット」)。03.58.00 からはデータパック・リソースパック・シェーダー・Modパックも取り込む。それより前に取り込んだパネルでは `maybeImportV02Kinds` が一度だけ、その種類だけを取り込み(v02 の保存先は前に登録したものを使う)、取り込み済みの同じ名前のセットに足す(結果は `/data/v03/import-v02-kinds.json`。ライブラリと一緒に取り込んだときは印だけを置く)。
 
 ## セット
 
@@ -98,11 +112,15 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - 権限: 作る・中身を変える・入れるのは `library: ["edit"]`、見るのはメンバー全員。無料の上限は 1 チーム 50 個・1 セット 200 件(`SET_LIMITS`)。
 - サーバーに結び付けるセットは 1 台に 1 つ(表 `server_set`)。「そろえる」(`sync`)は `apply` と同じく種類の合うものだけを扱い、足りないものを入れ、入っているもの(`installed_mod`)に新しい版(`latestFile` の版が記録と違う)があれば入れ直す(= 更新。古いファイルは消す)。セットに無いものは外さない。
 - 「更新を止める」(表 `server_hold`、サーバー × 配布元 × ID)。そろえる・予約・更新の確認では、止めたものを新しい版にしない(画面の「更新」は、その場の操作なので止めない)。
+- 版の固定(03.59.00 から。v02 の `set_items.version_id`): `addon_set_item.version_id`(配布元の版の ID・アップロードしたものはファイルの ID)と `version_number`(表示用)。null はいつもサーバーに合う新しい版。`pin`(`library: ["edit"]`)は配布元に版があることを確かめて保存する(SpigotMC は前の版を取れないので固定できない)。`applyTo` は固定したものを、`versionsOf` にその版があれば `fileById` で入れ、無ければ「合わないので飛ばしました」(`pinned: true`。まとめ・通知にも載せる)。自動更新・まとめて最新・予約の update(`updateInstalled`)は、結び付けたセットの固定(`modTools.pinsOf`)を使い、更新の確認(`updatesOf`)は固定したものを見ない。「更新を止める」はサーバーごとに今の版のままにするもので、固定より先に効く(止めたもの・無効にしたもの・`add` で入っているものは、固定した版にしない)。ほかのサーバーにそろえる(`copy`)は、そろえる元の版を使うので固定を見ない。v02 の固定は `maybeImportV02Pins` が一度だけ、Modrinth はファイルの SHA-1(`/version_files` にまとめて 1 回)・CurseForge はファイルの名前(新しい 30 件の中)・アップロードしたものは SHA-256 で取り込んだファイルに対応させ、取れないものは「固定を引き継げなかったもの」として結果(`/data/v03/import-v02-pins.json`)に出す。v03 で固定を決め直したものは上書きしない。
 - サーバーの比較(`/compare`): `catalog` の `installs` だけで表を作る(サーバーには問い合わせない)。版を選ぶときは `versions`(Modrinth・CurseForge はサーバーの種類・バージョンに合う版を新しい順に 30 個、アップロードしたものは保存した版。SpigotMC は前の版を取ってこられないので無し)。`install` に `versionId` を渡すと、その一覧にある版だけを受け付け、いちばん新しい版でなければ `server_hold` に入れる。
 - 種類(プラグイン・Mod): Modrinth は、Fabric などにも対応したプラグインを `project_type: "mod"` と返すので、ライブラリに足すときは探したときの種類、入れたときは入れたサーバーの種類で決める。
 - 「前の版に戻す」: `installInto` が更新で入れ替えた版を表 `install_history` に残す(1 つにつき 10 件)。`rollback` はいちばん新しい前の版を `fileById`(Modrinth は `/version/<ID>`、CurseForge は `/files/<ID>`、アップロードは版の行)で取り直して入れ、使った記録と戻す前の版の記録を消し、`server_hold` を付ける。SpigotMC は古い版を取ってこられないので戻せない。
 - 前提: Modrinth の版の `dependencies` のうち `required` のもの(CurseForge は `relationType: 3`)を `FileChoice.deps` で返し、同じ配布元から、`installInto` がまだ入っていないものを入れる(2 段まで。入れられなくても本体はそのまま)。
 - 「セットに無いものを外す」(`sync` の `removeExtra`)は、`installed_mod` の記録があるもの(このアプリで入れたもの)のうち、セットに無いものだけを外す。手で置いたファイルは記録が無いので触らない。予約では外さない(気づかないうちに消えないように)。
+- そろえ方(03.55.00 から、「ほかのサーバーにそろえる」と同じ 3 通り): `sync` の `how` が `update`(`applyTo` の `update`。入っているものだけ新しい版に)/ `add`(既定。足りないものも入れる)/ `mirror`(さらにセットに無いものを外す = 前の `removeExtra: true`)。画面ではそろえる元に、結び付けたセットかほかのサーバー(`copy`)を選ぶ。
+- セットの前提(`missingDeps`、03.55.00 から): セットの Modrinth・CurseForge のもののうち、選んだサーバーの種類に合うものの `latestFile` の `deps` を見て、セットに無いものを、使うものの名前と一緒に返す。`addDeps`(`library: ["edit"]`)はライブラリに載せて(種類は選んだサーバーの種類)セットに足す。
+- まとめて最新にする(`updateServers`、03.55.00 から。サーバーの一覧): 選んだサーバー(空なら割り当てで使えるすべて)の入っているものを `applyTo`(`sync`)で新しい版にする(自動更新と同じ `updateInstalled`)。変えたもの・失敗したものだけを返し、記録する。
 
 - **SpigotMC**(`src/server/spiget.ts`): Spiget(SpigotMC の公開 API)で探し、Pterodactyl に `https://api.spiget.org/v2/resources/<数字の ID>/download`(Spiget の CDN へ転送される)を取り込ませる。URL はこちらで組み立てるものだけ。SpigotMC の外のサイトで配っているもの(external)・有料のもの(premium)・プラグインではないカテゴリー(Standalone・Web・DataPack)は扱わない。
   - 動くサーバーはカテゴリーで決める(`spigetFits`): サーバー用 → Paper・Purpur・Spigot、プロキシ用 → BungeeCord、Universal → 両方。Folia・Velocity は見分けられないので入れない。Minecraft のバージョンでは絞らない(SpigotMC の対応バージョンは作者の自己申告で粗いため)。版はいちばん新しいものだけ(古い版は Spiget から取り込めない)。
@@ -112,20 +130,37 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 
 ## 操作の記録と通知
 
-- 操作の記録(表 `audit_log`。`src/server/events.ts` の `record`)。各サービスの、変える操作の最後に記録する(だれが・何を・どのサーバーに・詳しい内容)。予約で動いたものは user_id が null。見られるのは `member: ["update"]`(管理者以上)。
-- Discord への通知(表 `team_notify`)。Webhook の URL は `seal` で暗号化して保存し、`https://discord.com/api/webhooks/…`(discordapp.com・ptb・canary を含む)だけを受け付ける。記録の種類(`EVENT_KINDS`: changes・sets・schedule・power・admin)のうち、選んだものだけを送る。`allowed_mentions` を空にしてメンションさせない。送れなくても、もとの操作は失敗させない。
+- 操作の記録(表 `audit_log`。`src/server/events.ts` の `record`)。各サービスの、変える操作の最後に記録する(だれが・何を・どのサーバーに・詳しい内容)。予約で動いたものは user_id が null。見られるのは `member: ["update"]`(管理者以上)。画面では操作・対象・詳しく・人の名前で探せる(`list` の `q`、ILIKE。`%`・`_` はそのままの文字)。
+- Discord への通知(表 `team_notify`)。Webhook の URL は `seal` で暗号化して保存し、`https://discord.com/api/webhooks/…`(discordapp.com・ptb・canary を含む)だけを受け付ける。記録の種類(`EVENT_KINDS`: changes・sets・schedule・power・admin・updates・auto・errors・backup・panel)のうち、選んだものだけを送る。記録は 1 つの種類(`kind`)で残し、ほかにも当てはまる種類は `also` で渡す(自動更新・予約で入れた → auto、失敗 → errors、バックアップ → backup。前からの種類を選んだチームにも、前と同じように届く)。`allowed_mentions` を空にしてメンションさせない。送れなくても、もとの操作は失敗させない。
 
-- ファイル比較(`/compare/files`、`files.configs`): v02 と同じ場所(一番上・plugins は 3 段・config は 4 段・mods/config は 3 段)から、開ける設定ファイルを 1 台 400 個まで集める。一覧では中身を読まず大きさで見る。開いたら全部を読み、行の差分(`src/lib/diff.ts`、Myers の方法)で基準にそろえて並べる。写すのは `files.save`(履歴に残る)。
+- 新しい版の見回り(`setService.runUpdateChecks`、1 分ごと): 前に確かめてから 1 日(`UPDATE_CHECK_EVERY`)たったサーバーを 1 回に 2 台まで、`update_checked_at` を条件付きで書き換えてから確かめる(配布元へは入っているもの 1 つにつき 1 回。自動更新を入れたサーバーは見ない)。見つけた行を `server.update_notice` に残し、前に知らせていない行だけを `updates` で記録する。
+- パネルの新しい版(自分用の版、`startup.ts`): 6 時間ごとに GitHub のリリースを見て、いまより新しい版があれば `events.announcePanel` ですべてのチームに `panel` で記録する(同じ版は 1 度だけ)。
+- お知らせ(ベル)の既読は、利用者 × チームごとに表 `notice_seen` に残す(どの端末でも同じ。先へ進めるだけ)。
+- ファイル比較(`/compare/files`、`files.configs`): v02 と同じ場所(一番上・plugins は 3 段・config は 4 段・mods/config は 3 段)から、開ける設定ファイルを 1 台 400 個まで集める。一覧では中身を読まず大きさで見る。開いたら全部を読み、行の差分(`src/lib/diff.ts`、Myers の方法)で基準にそろえて並べる。写すのは `files.save`(履歴に残る)。行の操作と直接の書き換えは、画面の中だけの「元に戻す・やり直す」(Ctrl+Z・Ctrl+Y・Ctrl+Shift+Z とボタン。続けて打った文字は 1 回で戻す。100 回まで)で戻せる。
 
 - サーバーの割り当て(表 `member_server_limit`・`member_server`): `member_server_limit` に行がある閲覧者・編集者は、`member_server` のサーバーだけを使える。確かめるのは `serverOf(deps, who, id)`(`who` は `requireTeam` の結果。チームの ID だけを渡すのは予約などの人でない操作だけ)と `needServerAccess`、一覧は `serverScope` で絞る。管理者・オーナーは制限しない。
 
-- サーバー本体(`software.ts`、表 `server_software`): 今のビルドは「入れ替えた記録(jar の大きさが同じなら)→ version_history.json → jar の名前」の順に読む。入れ替えは、今の jar を `<jar>.craftshelf-old` に名前を変えてから、同じ名前で配布元(`BUILD_HOSTS` の公式の取得先だけ)から取り込ませる。取り込めなければ名前を戻す。戻すときは 2 つの名前を入れ替える(もう一度押すと元に戻る)。
+- サーバー本体(`software.ts`、表 `server_software`): 今のビルドは「入れ替えた記録(jar の大きさが同じなら)→ version_history.json → jar の名前」の順に読む。入れ替えは、今の jar を `<jar>.craftshelf-old-<数字>` に名前を変えてから、同じ名前で配布元(`BUILD_HOSTS` の公式の取得先だけ)から取り込ませる。取り込めなければ名前を戻す。残した jar は `server_software.old_jars` に新しい順で 5 つまで(古いものはサーバーから消す。いちばん新しいものは `backup_jar` にも書くので、前の版でも 1 つは戻せる)。戻すときは、選んだ jar と今の jar の名前を入れ替え、今の jar を残した側に入れる。
+  - サーバー本体の種類(`src/lib/software.ts` の `SOFTWARE`。03.54.00 から): サーバーの種類(Mod・プラグインの置き場所)とは別に、「どこから何の jar を取るか」を決める。`server_software.software` に選んだもの → jar の名前(サーバーの種類と合うもの)→ サーバーの種類の順に決める。Paper・Folia・Purpur・Leaf・Pufferfish・Velocity・Waterfall・BungeeCord・Fabric・Vanilla・Mohist・SpongeVanilla は入れ替えられ、Forge・NeoForge・Quilt・Arclight は新しい版の確認だけ(v02 の `mcnet.py` と同じ公式の取得先。BungeeCord は移った先の hub.spigotmc.org)。`BUILD_HOSTS` は Pterodactyl への取り込み・フォルダのサーバーの転送先・エージェントの `AGENT_PULL_HOSTS` で同じものを使う。
+  - ビルドを選ぶ(`builds`・`install`): 配布元の一覧(新しい順に 25 個。Minecraft のバージョンも選べる。プロキシはプロキシの版)から選ぶ。取得先は、画面から来た URL ではなく、サーバーで一覧を引き直して決める。いちばん新しいものは安定版の中から選ぶ。Minecraft のバージョンを変えるとサーバーの種類のバージョンも変え、画面ではワールドのバックアップを勧める。
+  - 新しいビルドのお知らせ: 新しい版の見回り(`runUpdateChecks`)で、Mod・プラグインの行と一緒に「・サーバー本体(…): 今 → 新しい」の行を作る(同じ行は 2 度知らせない。自動更新を入れたサーバーでも、サーバー本体は見る)。
+  - 種類の判定(`detectServer`、v02 の detect_server): jar の名前・`SERVER_JARFILE`・決まったファイル(velocity.toml・purpur.yml・config/paper-global.yml・libraries/net/… など)・Pterodactyl の egg の名前から種類を、version_history.json・jar の名前・`MINECRAFT_VERSION` から Minecraft のバージョンを読む。Pterodactyl のサーバーを足したときに自動で埋め、画面の「サーバーのファイルから判定する」でも使う(決めるのは保存したとき)。
+- サーバーの状態の人数(`servers.status` の `ping`、`mcping.ts`): Minecraft の Server List Ping でオンラインの人数・最大・名前の一部(12 人まで)・応答の速さを読む。Pterodactyl は既定の割り当て(別名 → IP。0.0.0.0 ならパネルの名前)、フォルダのサーバーは 127.0.0.1 の `server-port`、エージェントはエージェントの `ping`(自分のサーバーのポートだけ。行き先は渡さない)。サービス版は、名前を引いた先が公開されたアドレス(`isPublicAddress`)のときだけつなぐ。Query は使わない。
 
 - 配布元を探す(`library.identify`): このアプリの記録が無い jar を 1 回に 100 個まで読み(Pterodactyl はダウンロード用の URL から)、Modrinth の `version_files`(SHA-1)・CurseForge の `fingerprints`(`fingerprint.ts`、v02 と同じ MurmurHash2)で探す。見つかったものは `installed_mod` に記録し、ライブラリにも載せる(種類はサーバーの種類)。見つからないものは `uploads.fromServer` でアップロードしたものとして取り込める。
 
-- 変更の履歴(表 `server_change`): `installInto` が入れる・更新を、`remove` が外すを残す。外すときは消さずに `<名前>.craftshelf-removed` に名前を変える(元に戻すと名前を戻す)。更新を元に戻すのは `fileById` で前の版を取り直す(SpigotMC はできない)。1 台につき新しい 30 件までで、古いものの残したファイルも消す。セットの「セットに無いものを外す」も同じように残す。
+- 変更の履歴(表 `server_change`): `installInto` が入れる・更新を、`remove` が外すを残す。外すときは消さずに `<名前>.craftshelf-removed` に名前を変える(元に戻すと名前を戻す)。更新を元に戻すのは `fileById` で前の版を取り直す(SpigotMC はできない)。1 台につき新しい 30 件までで、古いものの残したファイルも消す。セットの「セットに無いものを外す」も同じように残す(外すのは `modTools.removeFrom` にまとめてある)。
+- 無効にする(`library.setEnabled`): 消さずに `<名前>.jar.disabled` に名前を変える(v02 と同じ)。`installed_mod` の記録の名前も変え、履歴(「無効にする」「有効にする」)から戻せる。無効にしたものは、更新の確認・セットでそろえる・自動更新・ほかのサーバーにそろえるで入れ替えない(比較の表・入っているものには「無効」と出す)。
+- 設定フォルダの退避: プラグインを外す・更新で入れ替えるとき、jar の plugin.yml の名前と同じフォルダ(`plugins/<名前>/`)を `plugins/.craftshelf-config/<key>/<名前>/` に写し、`server_change.config_backup` に残す。元に戻すと上書きで戻す。Pterodactyl・フォルダ・エージェントのどれでも動くよう、`listFiles`・`readBytes`・`upload` だけで 1 ファイルずつ写す(隠しファイルは除く。100 個・20 MB・6 段を超えるフォルダは退避しない)。退避できなくても入れ替え・外すは続ける。履歴を消すときに退避先も消す(フォルダのサーバーの `deleteFiles` も、Pterodactyl と同じくフォルダーを中身ごと消す)。
+- ほかのサーバーにそろえる(`sets.copy`、画面は「ほかのサーバーとそろえる」。検証用から本番へ反映するのも同じ): そろえる元の `installed_mod`(無効にしたものは除く)と同じ版を、そろえる先の種類・バージョンに合うときだけ入れる(`versionsOf` に無い版は入れない。SpigotMC はいちばん新しい版のときだけ)。`update` = 入っているものだけ / `add` = 足りないものも / `mirror` = さらに、そろえる元に無いもの(このアプリで入れたもの)を外す。先で止めているもの・無効にしたものは変えない。元で止めているものは、先でも止める。プラグインと Mod のサーバーどうしはそろえない。
+- ライブラリに取り込む(`library.adopt`、比較の表から): 配布元がわかっていてライブラリに無いもの(`catalog.orphans`)はそのまま載せる。記録の無い jar は `identifyIn` で中身から探し、見つからなければ `uploads.fromServer`(自分用の版だけ)。
 
 - バックアップ(`backup.ts`、自分用の版・PGlite だけ): PGlite の `dumpDataDir`・`secret`・`library` を `tar` でまとめ、`/data/v03/backups` に新しい 5 個を残す。戻すときは `restore-pending.tar.gz` を置いて終了し、次の起動で(データベースを開く前・鍵を読む前に)`applyPendingRestore` が入れ替える。今のデータは `before-restore-<日時>` に移し、失敗したら元に戻して `restore-failed-…` に名前を変える。
+  - 定期バックアップ(表 `backup_schedule`、03.53.00 から): 毎日 `time`(`tz` は保存したブラウザの時間帯)に作る。置き場所は `target_id` の保存先(`_craftshelf_backup/`。v02 と同じ場所で、名前が違うので混ざらない)か、null ならパネルの中。新しい `keep` 個を残す(手で作るときも同じ)。保存先に置いたものは一覧(`Store.list`)から、ダウンロード・戻すもできる。
+- ワールドのバックアップ(`worlds.ts`、表 `world_backup`、03.53.00 から): Pterodactyl はパネルのバックアップ(Client API の backups。サーバー全体)を作り、名前が `CraftShelf ` で始まるもの(このアプリが作ったもの)だけを、鍵つき・作っている途中を除いて `keep` 個まで残す。ダウンロードは Wings の署名付きの URL へ移す。フォルダのサーバー・エージェント(自分用の版だけ)は、`level-name` と `_nether`・`_the_end` を `listFiles`・`readBytes` で 1 ファイルずつ読み、`tar.ts` で tar.gz に少しずつ書く(メモリは 1 ファイルぶん。100 MB を超えるもの・読めないものは飛ばして記録に書く。`session.lock` は入れない)。RCON・コンソールが使えれば `save-off`・`save-all flush` のあとで読み、終わったら `save-on`。置き場所は保存先(`_craftshelf_worlds/<サーバーの ID>/`)かパネルの中(`/data/v03/worlds/<サーバーの ID>/`)。大きいファイルを送る・読むのは `Store.putFile`・`Store.read`(ストリーム)。手で作るときは始めたらすぐ返し、終わると一覧・操作の記録(種類 `backup`、失敗は `errors` も)に出る。予約は 1 分ごとの `tick` で、`last_run_at` を条件付きで書き換えてから始める(終わるのは待たない)。
+  - 戻す(`restore`、管理者以上。画面では 2 回確かめる): Pterodactyl はパネルの復元(`truncate` を選べる)。フォルダのサーバー・エージェントは、状態が止まっている(か分からない)ときだけ戻し、動いていれば `stop` を選んだときだけ止めて待つ(2 分)。tar.gz を `untarGz` で 1 ファイルずつ読み、1 つのワールド(と `_nether`・`_the_end`)の中のものだけを受け付ける。最初に出てきたフォルダごとに、今のフォルダを `<名前>.craftshelf-before-restore-<日時>` に名前を変えて残してから `upload` で書く。途中で失敗したら、書いたフォルダを消して名前を戻す。
+
+- 時刻: 表の時刻は `timestamp`(時間帯なし)で、Drizzle は UTC として読み書きする。データベースのつなぎの時間帯を UTC にしている(`db/index.ts`。PGlite はパソコン・コンテナの時間帯を使うため。移行は切り替える前に流し、`0025_time_utc` がそれまでの時間帯で `now()` が入れた時刻を UTC に直した)。画面では利用者の時刻で出す。
 
 - Modpack(`modpack.ts`): ファイルを持たないので、.mrpack は `modrinth.index.json` の mods/ の SHA-1 で Modrinth の版を探し(env.server が unsupported のものは飛ばす)、CurseForge は `manifest.json` の projectID を使う。名前はまとめて取り(Modrinth `/projects`・CurseForge `POST /mods`)、ライブラリに Mod として載せ、同じ名前のセットを作る。overrides は、サーバーを選んだときだけ、テキストの設定ファイル(`files.editable`)を 300 個まで書き込む(上書きする前の中身は `server_file_history` に残す)。
 
@@ -138,13 +173,16 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 ## 予約
 
 - チームごとに 1 つ(表 `team_schedule`)。曜日・時刻(`tz`、いまは日本時間)・すること(`check` = 確かめるだけ / `sync` = そろえる)。決めるのは `server: ["update"]`。
-- `src/server/startup.ts` が 1 分ごとに `tick` を呼ぶ(前の回が終わっていなければ飛ばす)。時刻になったチームは、動かす前に `last_run_at` を条件付きで書き換え、書き換えられたときだけ動かす(同じ分に 2 回・複数のプロセスで重ねて動かさない)。
+- `src/server/startup.ts` が 1 分ごとに `tick` を呼ぶ(処理ごとに、前の回が終わっていなければ飛ばす)。時刻になったチームは、動かす前に `last_run_at` を条件付きで書き換え、書き換えられたときだけ動かす(同じ分に 2 回・複数のプロセスで重ねて動かさない)。
 - 中身は `setService.runForSchedule`(画面からは呼ばない)。セットを結び付けたサーバーを 1 台ずつ `applyTo` し、1 台が失敗しても残りは続ける。結果は `schedule` の種類で記録する(user_id は null)。
+- サーバーごとの予約(表 `server_schedule`、03.55.00 から。v02 の予約同期): `mode` = off / daily / weekly(`dow`)、`time`(`tz`)、すること `action` = update(入っているものを最新に)/ sync(結び付けたセットでそろえる)、`restart` = 何か変えたら再起動する。決めるのは `server: ["update"]`。`serverTick` が 1 分ごとに、チームの予約と同じく `last_run_at` を条件付きで書き換えてから動かし、結果をいつも `schedule` の種類で記録する(Discord には、何か変えたとき・失敗したときだけ送る。`record` の `quiet`、03.56.00 から)。チームの予約(`team_schedule`)とは別に動く。v02 の `sched_*` は `maybeImportV02Schedules` で一度だけ update として引き継ぐ(結果は `/data/v03/import-v02-schedule.json`)。
+- サーバーごとの自動更新(`server.auto_update`、入れる・やめるのは `library: ["edit"]`): 同じ 1 分ごとの見回りで `setService.runAutoUpdates` を呼ぶ。前に確かめてから 6 時間(`AUTO_UPDATE_EVERY`)たったサーバーを、`auto_updated_at` を条件付きで書き換えてから動かし、入っているものを `applyTo`(`sync`)で新しい版にする(止めたもの・無効にしたものは除く)。何か変えたとき・失敗したときだけ記録する。v02 で自動更新をオンにしていたサーバーは `maybeImportV02AutoUpdate` で一度だけ引き継ぐ(結果は `/data/v03/import-v02-auto-update.json`)。
 
 ## ファイルとコマンド
 
 - コマンド(`src/server/files.ts` の `command`)は Pterodactyl の `/command` に送る。1 行・500 文字まで、権限は `server: ["control"]`。出力はウェブソケットが要るので、いまは受け取らない(パネルのコンソールで見る)。
-- 設定ファイルは、サーバーのフォルダーの中の相対パスだけ(`cleanPath`。`..`・`.`・空の区切り・改行を断る)。開けるのはテキストの拡張子(`TEXT_FILE`)で 512 KB までのものだけ。見る・直すのは `server: ["update"]`(パスワードなどが入っていることがあるため)。
+- 設定ファイルは、サーバーのフォルダーの中の相対パスだけ(`cleanPath`。`..`・`.`・空の区切り・改行を断る)。開けるのはテキストの拡張子(`TEXT_FILE`)で 512 KB までのものだけ。見る・直すのは `files: ["edit"]`(パスワードなどが入っていることがあるため。管理者以上。03.59.00 までは `server: ["update"]`)。チームが「編集者にも許す」(表 `team_option.editor_files`、決めるのは `member: ["update"]`、既定はオフ)を選ぶと、編集者の既定に `files:edit` が入る(`permsOf`。人ごとの足し引きはその上に効く。割り当てたサーバーだけ)。
+- 保存する前に、画面で書き方を確かめる(`src/lib/syntax.ts`: JSON は `JSON.parse` と場所を探す小さな読み手・YAML は `yaml`・TOML は `smol-toml`・properties は `\u` の形だけ)。誤りがあれば行番号つきで知らせ、それでも保存するかを聞く(サーバー側では断らない)。
 - 保存するときは、開いたときの中身(base)とサーバーのいまの中身を比べ、違えば保存しない(409)。保存する前の中身を表 `server_file_history` に残す(1 ファイル 30 件)。
 
 ## フォルダでつなぐサーバー(自分用の版だけ)
@@ -166,17 +204,39 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - サーバーへは `installInto` が、サーバーの種類に合う作り(`loaders`)のいちばん新しい版を、保存先から読んで送る。Pterodactyl は `files/upload` の署名付きの先へ multipart で送る(undici の fetch には undici の FormData を使う)。フォルダのサーバーは書き込む。
 - v02 からの取り込み(`importUploads`、ライブラリ・セットより先に行う): 配布元がわからないプラグイン・Mod を `upload` の項目にし、版は v02 の保存先のファイルをそのまま指す(コピーしない)。v02 のパネルの中(`/data`、中の場所は `library/<relpath>`)・WebDAV・SMB を v03 の保存先として登録する(使う保存先にはしない)。NFS など v03 に無い方式は飛ばす。動くサーバーの種類は v02 の `meta.loader` の表示から決める。
 - アップロード・ダウンロードはファイルをそのまま送るので、サーバーの関数ではなく `/api/library/upload`・`/api/library/files/<ID>` の口を使う(権限の確認は `uploadService`)。
+- 1 つ 1 GB まで(v02 と同じ。`UPLOAD_LIMITS.fileBytes`)。`receive` は権限を確かめてから、本文を `/data/v03/tmp` に少しずつ書き(上限を超えたらやめる)、jar はファイルの目次と説明ファイルだけを読み(`jar.ts` の `fileSource`)、保存先へは `putFile` で送る。ダウンロード・共有リンク(1 つのとき)は `Store.read` で少しずつ返す。サーバーへ送るとき(`installInto`)と、サーバーの jar を取り込むとき(100 MB まで)はメモリに読む。画面は、いくつでも・フォルダごと(中の .jar だけ)・ドラッグ&ドロップで選べ、1 つずつ順に送る。
 
 ## 共有リンクと利用状況
 
-- 共有リンク(表 `share_link`、自分用の版だけ): アップロードしたもののいちばん新しい版を、ログインしていない人に渡す。トークンは 24 バイトの乱数で、SHA-256 のハッシュだけを保存する(URL は作ったときにだけ返す)。期限は 1 時間〜30 日。いくつかなら圧縮しない zip(`src/server/zip.ts`)。URL は `/s/<トークン>/<ファイル名>`(wget などでも元の名前で保存されるように)。作るのは `library: ["edit"]`、一覧・削除は作った人(管理者はすべて)。
-- 利用状況(`usage`、管理者以上): ライブラリの件数(配布元ごと)・アップロードした版の数と大きさ(保存先ごと)・サーバー・入れたもの・セット・メンバー・共有リンクの数。
+- 配布元のファイルの保存(03.61.00 から、自分用の版だけ。v02 と同じく使えるように。`src/server/saved.ts`): 版は `library_file` に、アップロードしたものと同じく持つ(`upstream_version_id` = 配布元の版の ID。"" はアップロードしたもの)。保存するか(`library_item.keep_files`: "" = チームの既定 / on / off、チームの既定は `team_option.keep_files`。既定は保存しない)が on なら、`installInto` が配布元から入れたあとに同じ版を保存する(`fileStore.saveUpstream`。配布元の CDN からだけ・転送も CDN の中だけ・1 GB まで・一時フォルダに少しずつ書いて jar を読み、使っている保存先へ)。手でも版の一覧・「保存した版」から保存できる(`saved.save`、`library: ["edit"]`。SpigotMC はいちばん新しい版だけ)。保存した版があれば、`installInto` は配布元から取らず保存先から送る。配布元につながらない・合う版が無いときは、保存した版のうちサーバーの作りに合ういちばん新しいもの(`savedPick`)を使い、名前はライブラリのものを使う。サービス版は保存先が無いので保存しない(容量の心配もない)。
+- 古い版の自動整理(v02 01.04。`fileStore.prune`): アイテムの `keep_versions`(null = チームの `team_option.keep_versions`。0 は整理しない)を超えた古い版(新しく保存・アップロードした順)を、保存先からも消す。サーバーに入っている版(`installed_mod.version_id`)・セットで固定した版(`addon_set_item.version_id`)は消さない(`keptVersions`)。保存・アップロードのあと・設定を変えたときに行う。ライブラリから外すと、その版も保存先から消す。
+- まとめて zip(v02 の items/zip・sets/download): `/api/library/zip`(GET の ids・set か、画面からはフォームの POST)。保存した版(アイテムごとにいちばん新しいもの。セットは固定した版)だけを、種類ごとのフォルダ(plugins/・mods/ など)に入れる。`zipStream` が 1 つずつ読みながら deflate で書く(大きさは後ろのデータ記述子に。ZIP64 は使わないので 3.5 GB まで)。保存していないものは入れず、先に `zipPlan` で知らせる。共有リンクの zip も同じく少しずつ作る。
+- 保存先の状況と中身(v02 の storage/status・contents、`storage: ["manage"]`): `Store.ls`(フォルダの中。WebDAV は PROPFIND の response ごと)でつながるか・応答の時間、`Store.space`(フォルダは statfs・WebDAV は RFC 4331 の quota。SMB は出さない)で容量と空き。中身は 6 段・2000 個まで、登録しているファイルにはアイテムの名前を付け、登録していないものは「記録なし」、inbox/ のものは「取り込み待ち」。
+- 保存先からの取り込み(v02 の scan の inbox。`storage: ["manage"]` と `library: ["edit"]`): 保存先の `inbox/` の .jar・.zip・.mrpack(200 個まで)を一時フォルダに読み、Modrinth(SHA-1)・CurseForge(フィンガープリント)で探す。見つかれば配布元のアイテムの保存した版に、見つからなければ `uploads.ingest` でアップロードしたものにして、その保存先に置き、inbox/ から消す。読めないものは残して理由を返す。
+- アドオンの整理(v02 01.15。`/cleanup`、`library: ["edit"]`): 古い版(新しい方から n 個より古い)・同じ版の重複・長く更新の無いもの(配布元の最後の更新 = Modrinth の updated・CurseForge の dateModified・SpigotMC の updateDate、アップロードしたものは最後に版を足した日)・どのサーバーにも入っていないもの(プラグイン・Mod・データパック。セットに入っているものは最初は選ばない)を抜き出し、選んだ版・アイテムを消す。サーバーで使っている版・固定した版は出さない。
+- v02 からの取り込み(`maybeImportV02Saved`、ユーザーごとの権限のあとで一度だけ。結果は `/data/v03/import-v02-saved.json`): v02 の auto_download → チームの「保存する」、items.keep_versions → アイテムの残す数(v03 で決めたものは上書きしない)、配布元のわかるアイテムの v02 のファイル → 保存した版(v02 の保存先のファイルをそのまま指す。配布元の版は Modrinth の SHA-1 で探し、わからなければ `v02:<版の番号>`)。
+- 共有リンク(表 `share_link`、自分用の版だけ): アップロードしたもの(03.61.00 から保存した版も)のいちばん新しい版を、ログインしていない人に渡す。トークンは 24 バイトの乱数で、SHA-256 のハッシュだけを保存する(URL は作ったときにだけ返す)。期限は 1 時間〜30 日か無期限(`expires_at` を 9999 年にする。前の版でも期限内として読める)。回数の上限(`max_downloads`、1〜1000 回、null は上限なし)は、数えるのと同じ 1 つの UPDATE で確かめる。「止める」は期限を今にする(一覧に残る)。画面は URL と wget・curl のコマンドを出す。いくつかなら zip(`src/server/zip.ts` の `zipStream`。少しずつ作る)。URL は `/s/<トークン>/<ファイル名>`(wget などでも元の名前で保存されるように)。作るのは `library: ["edit"]`、一覧・削除は作った人(管理者はすべて)。
+- 利用状況(`usage`、管理者以上): ライブラリの件数(配布元ごと)・アップロードした版の数と大きさ(保存先ごと)・サーバー・入れたもの・セット・メンバー・共有リンクの数。ユーザーごと(`perUser`、03.55.00 から): 登録したもの(種類ごと)・アップロードした版と大きさ・作ったセット・共有リンク・操作の記録の数(すべてと 30 日)・最後の操作。どれもこのチームの中だけを数える。
 
 ## API と API トークン
 
-- トークンは Better Auth の apiKey(`cs_` で始まる。ハッシュだけを保存)。`metadata` にチーム(`teamId`)と「読み取りだけ」(`readOnly`)を持たせ、作った人のそのチームでの役割で動く。1 分に 120 回まで。作る・消すのはログインしてから(トークンでは作れない)。
-- 確かめるのは `src/server/guard.ts` の `requireUser`・`requireTeam`。`x-api-key` か `Authorization: Bearer cs_…` があればトークンとして確かめ(`verifyApiKey`)、役割の権限は `roles[role].authorize` で見る。読み取りだけのトークンは、権限を求める操作をすべて断る。チームを抜けた人のトークンは使えない。Better Auth の「トークンでログインしたことにする」設定は使わない。
-- 外から呼べる API(`src/server/rest.ts`、`/api/v1/…`)は、画面と同じサービスの処理を呼ぶだけ(権限の確認もそちら)。ブラウザのログインの Cookie では使わせず、トークンだけを受け付ける(ほかのサイトから呼ばれないように)。`GET /api/v1` で一覧を返す。
+- トークンは Better Auth の apiKey(`cs_` で始まる。ハッシュだけを保存)。`metadata` にチーム(`teamId`)と範囲(`scopes`。03.57.00 から)を持たせ、作った人のそのチームでの今の権限(役割とメンバーごとの足し引き)で、範囲の中だけ動く。範囲は `read`(いつも付く)・`library`・`control`・`admin`(`src/lib/permissions.ts` の `TOKEN_SCOPES`)で、作った人の権限を超えるものは作れない(その範囲で使える権限を 1 つでも持っていれば作れる: `permsAllowScope`。編集者は library・control まで、閲覧者は read だけ。設定ファイルを足した編集者は admin も作れるが、使えるのは持っている権限の分だけ)。前の版に戻しても狭まるよう `readOnly`(read だけのとき true)も書く。03.56 までのトークン(`scopes` なし)は、`readOnly` なら read、そうでなければすべての範囲。1 分に 120 回まで。作る・消すのはログインしてから(トークンでは作れない)。
+- 確かめるのは `src/server/guard.ts` の `requireUser`・`requireTeam`。`x-api-key` か `Authorization: Bearer cs_…` があればトークンとして確かめ(`verifyApiKey`)、権限はログインと同じ `memberPerms` で見る。トークンの範囲は、処理が求める権限から決める(`scopesFor`: library の権限 → library、server の control → control、それ以外 → admin)。範囲が足りなければ断る(read だけのトークンは、権限を求める操作をすべて断る)。チームを抜けた人のトークンは使えない。Better Auth の「トークンでログインしたことにする」設定は使わない。
+- 外から呼べる API(`src/server/rest.ts`、`/api/v1/…`)は、画面と同じサービスの処理を呼ぶだけ(権限の確認もそちら)。ブラウザのログインの Cookie では使わせず、トークンだけを受け付ける(ほかのサイトから呼ばれないように)。GET はクエリー、POST は JSON を受け取る。ルートの定義(`ROUTES`)には、ひとことの説明(`summary`)・要る範囲(`scope`)・POST の中身の例(`example`)を書き、`GET /api/v1` と画面の「API の説明」(`/api-docs`、curl の例つき)はここから作る(手で二重に書かない)。`tests/rest-docs.test.ts` が説明・範囲の無いもの・英訳の無いものを、`tests/api.test.ts` が範囲の無いトークンで説明どおりに断られるかを確かめる。
+
+## 処理の一覧・個人の設定・ホーム画面に追加(03.57.00 から)
+
+- 処理の一覧(`src/server/jobs.ts`、表 `job`、画面 `/jobs`): 時間のかかる処理を、待ち(`queued`)・実行中・成功・失敗で残す。各サービスが `jobService(deps).track(情報, 処理, 結果のまとめ)` で包む(まとめての処理は `queue` で先に待ちとして並べる)。書いているのは、サーバーへの導入・セットを入れる・セットでそろえる・ほかのサーバーにそろえる・まとめて最新にする・自動更新・予約・サーバー本体の入れ替えと戻す・ワールドのバックアップと戻す・パネルのバックアップ。状態を書けなくても処理は止めない。終わってから 30 日で消す。起動したとき(`instance.ts` の `build()`、リクエストを受ける前)に、待ち・実行中のまま残ったものを失敗にする(プロセスは 1 つの前提)。見られるのはチームのメンバー全員(サーバーを割り当てられた人は、そのサーバーのものと自分の操作だけ)。
+- 1 分ごとの処理(`startup.ts` の `minuteTasks`): 処理ごとに独立して動かし、前の回が終わっていない処理だけを飛ばす(どれかが返ってこなくても、ほかは毎回動く)。
+- 個人の設定(`src/server/prefs.ts`、表 `user_pref`): 見た目(明るさ・アクセント・テーマ・背景の暗さとぼかし)をアカウントに保存し、`getAppState` で渡す。画面はアカウントの値を当て、まだ無ければブラウザの値を使ってアカウントにも保存する。背景画像は大きいのでブラウザごと(サーバーに送らない)。テーマは v02 の 8 つ(`src/lib/theme.ts` の `PRESETS`。明るさとアクセントの色も決める)と標準。背景は `body::before`(ぼかし `--bg-blur`)・`body::after`(暗さ `--bg-dim`)に置く。v02 の個人設定は `maybeImportV02Prefs` で一度だけ引き継ぐ(`/data/v03/import-v02-prefs.json`)。
+- ホーム画面に追加(PWA): `public/manifest.webmanifest`・アイコン(v02 と同じ)・`public/sw.js`。サービスワーカーは画面を保存せず、つながらないときだけ `public/offline.html`(「つながっていません」)を出す。本番のビルドで、https か localhost のときだけ登録する。
+
+## パネルの更新・Docker なしの配布・ログインを戻す(03.62.00 から。自分用の版だけ)
+
+- 自動アップデートと「この更新の前に戻す」(`src/server/updates.ts`、v02 の `_self_update_tick`・01.24 の「アップデートの前の状態」): 版の切り替え(手でも自動でも、`updates.update` / `check`)は、先に `backups.makeFor` でパネルのバックアップを作り(PGlite のときだけ)、`versions.use` で切り替えて、{前の版・新しい版・バックアップ} を更新の記録に残す。戻す(`rollback`、`panel:manage` と `member:update`)は、そのバックアップを restore-pending に置き(`backups.restoreFor`)、版を前のものにする(イメージの版ならそれ、取ってきてあればそれ、無ければ取ってくる)。版を戻せなければ restore-pending も消す。設定・記録・自動では入れ直さない版(`skip`)は `/data/v03/panel-update.json` に置く(データベースに置くと、バックアップから戻したときに消えるため)。`startup.ts` が 6 時間ごとに `check` を呼び、新しい版を知らせ(`announcePanel`)、自動アップデートを使うなら `pickAuto`(安定版だけ / 開発版も・メジャーが同じ・いまより新しい・skip に無い)の版を入れて再起動する。処理の一覧に待ち・実行中のものがあれば、その回は入れない。v02 の `self_auto_update` は `maybeImportV02SelfUpdate` が一度だけ(安定版だけで)引き継ぐ。
+- 起動のしかた: Docker は `docker/start.sh`、それ以外(Windows・macOS の配布物・Linux の `install.sh`)は `packaging/launcher.mjs`(外のパッケージを使わない Node のスクリプト)。どちらも、パネルで選んだ版(`versions/current`)を `.starting` の印を付けて起動し、前回うまく起動しなかったら入っている版に戻す。ランチャーはパネルが終了したら起動し直し(再起動 = `process.exit(0)`)、`CRAFTSHELF_APP_DIR`(入っている版の場所。`versions.ts` のイメージの版)・`CRAFTSHELF_DIST`(`installer` / `script`。利用状況の導入方法)を渡す。データの場所・ポート・`launcher.json` は v02 の launcher.py と同じ(v02 のデータがあれば取り込む)。タスクトレイは無い(Node だけでは作れないため。ウィンドウを閉じると止まる)。
+- 配布物(`scripts/package.mjs`): 公式の Node.js(SHASUMS256.txt で確かめる)と `app/`(`.output`・`drizzle`・`VERSION`)・ランチャー・起動するファイル(`CraftShelf.cmd` / `CraftShelf.command` / `craftshelf.sh`)をまとめて、`craftshelf-v03-<版>-<win-x64|darwin-arm64|darwin-x64|linux-x64|linux-arm64>.zip|tar.gz` を作る。`release-v03.yml`・`image.yml` の bundle が作ってリリースに付け、SHA256SUMS にも載せる。`install.sh` は Linux のものを取ってきて `/opt/craftshelf-v03` に置き、systemd の `craftshelf`(v02 と同じ名前・ユーザー・データ `/var/lib/craftshelf`)にする。
+- ログインを戻す(`src/server/owner-reset.ts`): `launcher.mjs reset-owner <メールか名前>` がデータの場所に `v03/reset-owner.json`(新しいパスワードつき)を置き、動いているパネルが 3 秒ごとに見て片付ける(PGlite は 1 つのプロセスしか開けないので、コマンドが直接データベースを書かない)。その人の two_factor・legacy_totp・passkey・session を消し、パスワードを置き換え、結果を `reset-owner-result.json` に書いて、所属するチームの操作の記録に残す。頼みごとのファイルはすぐ消し、10 分より古いものは使わない。
 
 ## これから決めること・作るもの
 

@@ -7,6 +7,9 @@ const svc = async () => (await import("~/server/instance")).library;
 const headers = () => getRequest().headers;
 const sid = z.string().min(1).max(64);
 const source = z.enum(["modrinth", "spigot", "curseforge", "upload"]).default("modrinth");
+// 種類(ライブラリ)と、サーバーに入れるときの種類(データパックだけ。ほかはサーバーの種類のもの)
+const type = z.enum(["plugin", "mod", "datapack", "resourcepack", "shader", "modpack"]);
+const kind = z.enum(["datapack"]).optional();
 
 export const serverDetail = createServerFn({ method: "GET" })
   .validator(z.object({ id: sid }))
@@ -21,16 +24,16 @@ export const installedMods = createServerFn({ method: "GET" })
   .handler(async ({ data }) => (await svc()).installed(headers(), data.id));
 
 export const searchMods = createServerFn({ method: "GET" })
-  .validator(z.object({ id: sid, query: z.string().max(100), source }))
-  .handler(async ({ data }) => (await svc()).search(headers(), data.id, data.query, data.source));
+  .validator(z.object({ id: sid, query: z.string().max(100), source, kind }))
+  .handler(async ({ data }) => (await svc()).search(headers(), data.id, data.query, data.source, data.kind));
 
 export const installMod = createServerFn({ method: "POST" })
-  .validator(z.object({ id: sid, projectId: z.string().max(20), source, versionId: z.string().min(1).max(64).optional() }))
-  .handler(async ({ data }) => (await svc()).install(headers(), data.id, data.projectId, data.source, data.versionId));
+  .validator(z.object({ id: sid, projectId: z.string().max(20), source, versionId: z.string().min(1).max(64).optional(), kind }))
+  .handler(async ({ data }) => (await svc()).install(headers(), data.id, data.projectId, data.source, data.versionId, data.kind));
 
 export const modVersions = createServerFn({ method: "GET" })
-  .validator(z.object({ id: sid, projectId: z.string().max(20), source }))
-  .handler(async ({ data }) => (await svc()).versions(headers(), data.id, data.source, data.projectId));
+  .validator(z.object({ id: sid, projectId: z.string().max(20), source, kind }))
+  .handler(async ({ data }) => (await svc()).versions(headers(), data.id, data.source, data.projectId, data.kind));
 
 export const removeMod = createServerFn({ method: "POST" })
   .validator(z.object({ id: sid, filename: z.string().min(1).max(200) }))
@@ -47,11 +50,11 @@ export const setModHold = createServerFn({ method: "POST" })
 export const libraryCatalog = createServerFn({ method: "GET" }).handler(async () => (await svc()).catalog(headers()));
 
 export const searchCatalog = createServerFn({ method: "GET" })
-  .validator(z.object({ query: z.string().max(100), type: z.enum(["plugin", "mod"]), source }))
+  .validator(z.object({ query: z.string().max(100), type, source }))
   .handler(async ({ data }) => (await svc()).searchCatalog(headers(), data.query, data.type, data.source));
 
 export const addLibraryItem = createServerFn({ method: "POST" })
-  .validator(z.object({ projectId: z.string().max(20), source, type: z.enum(["plugin", "mod"]).optional() }))
+  .validator(z.object({ projectId: z.string().max(20), source, type: type.optional() }))
   .handler(async ({ data }) => (await svc()).addItem(headers(), data.projectId, data.source, data.type));
 
 export const removeLibraryItem = createServerFn({ method: "POST" })
@@ -79,3 +82,65 @@ export const undoChange = createServerFn({ method: "POST" })
 export const rollbackMod = createServerFn({ method: "POST" })
   .validator(z.object({ id: sid, projectId: z.string().max(40), source }))
   .handler(async ({ data }) => (await svc()).rollback(headers(), data.id, data.source, data.projectId));
+
+export const tagLibraryItems = createServerFn({ method: "POST" })
+  .validator(z.object({ itemIds: z.array(sid).min(1).max(500), tag: z.string().max(60), on: z.boolean() }))
+  .handler(async ({ data }) => (await svc()).tagItems(headers(), data.itemIds, data.tag, data.on));
+
+export const favoriteLibraryItem = createServerFn({ method: "POST" })
+  .validator(z.object({ itemId: sid, on: z.boolean() }))
+  .handler(async ({ data }) => (await svc()).favorite(headers(), data.itemId, data.on));
+
+export const outdatedLibraryItems = createServerFn({ method: "GET" }).handler(async () => (await svc()).outdated(headers()));
+
+export const setModEnabled = createServerFn({ method: "POST" })
+  .validator(z.object({ id: sid, filename: z.string().min(1).max(200), enable: z.boolean() }))
+  .handler(async ({ data }) => (await svc()).setEnabled(headers(), data.id, data.filename, data.enable));
+
+export const adoptMod = createServerFn({ method: "POST" })
+  .validator(z.object({ id: sid, filename: z.string().min(1).max(200) }))
+  .handler(async ({ data }) => (await svc()).adopt(headers(), data.id, data.filename));
+
+const iid = z.string().min(1).max(64);
+
+export const addLibraryItemFromUrl = createServerFn({ method: "POST" })
+  .validator(z.object({ url: z.string().min(1).max(300) }))
+  .handler(async ({ data }) => (await svc()).addFromUrl(headers(), data.url));
+
+export const editLibraryItem = createServerFn({ method: "POST" })
+  .validator(z.object({ itemId: iid, projectType: z.string().max(10), loaders: z.array(z.string().max(20)).max(20).nullable(),
+    mcVersions: z.array(z.string().max(10)).max(60).nullable(), channel: z.string().max(10) }))
+  .handler(async ({ data }) => (await svc()).editItem(headers(), data.itemId, data));
+
+export const relinkLibraryItem = createServerFn({ method: "POST" })
+  .validator(z.object({ itemId: iid, url: z.string().min(1).max(300) }))
+  .handler(async ({ data }) => (await svc()).relinkItem(headers(), data.itemId, data.url));
+
+export const linkLibraryDep = createServerFn({ method: "POST" })
+  .validator(z.object({ itemId: iid, depItemId: iid, on: z.boolean() }))
+  .handler(async ({ data }) => (await svc()).linkDep(headers(), data.itemId, data.depItemId, data.on));
+
+export const libraryMissingDeps = createServerFn({ method: "GET" })
+  .validator(z.object({ itemId: iid.optional() }))
+  .handler(async ({ data }) => (await svc()).missingDeps(headers(), data.itemId));
+
+export const serverMissingDeps = createServerFn({ method: "GET" })
+  .validator(z.object({ id: sid }))
+  .handler(async ({ data }) => (await svc()).serverDeps(headers(), data.id));
+
+export const libraryItemVersions = createServerFn({ method: "GET" })
+  .validator(z.object({ itemId: iid }))
+  .handler(async ({ data }) => (await svc()).itemVersions(headers(), data.itemId));
+
+export const libraryItemChangelog = createServerFn({ method: "GET" })
+  .validator(z.object({ itemId: iid, versionId: z.string().min(1).max(64) }))
+  .handler(async ({ data }) => (await svc()).itemChangelog(headers(), data.itemId, data.versionId));
+
+export const setLibraryChannel = createServerFn({ method: "POST" })
+  .validator(z.object({ channel: z.string().max(10) }))
+  .handler(async ({ data }) => (await svc()).setChannel(headers(), data.channel));
+
+// ライブラリの Modパックから、セットを作る(serverId を渡すと、そのサーバーに設定ファイルと中身を入れる)
+export const modpackFromItem = createServerFn({ method: "POST" })
+  .validator(z.object({ itemId: iid, serverId: sid.optional() }))
+  .handler(async ({ data }) => (await import("~/server/instance")).modpacks.fromItem(headers(), data.itemId, data.serverId));

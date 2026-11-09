@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { renderSVG } from "uqr";
 import { authClient } from "~/lib/auth-client";
 import { errorText } from "~/lib/errors";
 import { getImportReport } from "~/lib/session";
-import { getVersions, installVersion, useImageVersion } from "~/lib/versions-api";
+import { getVersions, installVersion, rollbackUpdate, setAutoUpdate, useImageVersion } from "~/lib/versions-api";
 import { useCan } from "~/lib/use-can";
+import { SCOPE_LABELS, SCOPE_SHORT, TOKEN_SCOPES, type TokenScope, permsAllowScope } from "~/lib/permissions";
 import { useServerFn } from "@tanstack/react-start";
 import { createToken, listTokens, removeToken } from "~/lib/tokens-api";
 import { getLang, setLang } from "~/lib/i18n";
-import { ACCENTS, ACCENT_LABELS, type Accent, type Mode, backgroundFrom, getTheme, saveTheme } from "~/lib/theme";
+import { ACCENTS, ACCENT_LABELS, type Accent, DEFAULT_THEME, LIMITS, type Mode, PRESETS, type Preset, type Theme, backgroundFrom, getTheme, saveTheme } from "~/lib/theme";
+import { saveMyTheme } from "~/lib/prefs-api";
 import { sendFeedback, setTelemetry, telemetryInfo } from "~/lib/telemetry-api";
 import { deleteAccount } from "~/lib/teams-api";
 
@@ -40,8 +42,8 @@ function Settings() {
       </header>
 
       <div className="group-title">プロフィール</div>
+      <Profile name={user.name} username={user.username ?? ""} />
       <section className="group">
-        <div className="row"><span>表示名</span><span className="trail" translate="no">{user.name}</span></div>
         <div className="row"><span>メールアドレス</span><span className="trail" translate="no">{user.email.endsWith("@v02.craftshelf.invalid") ? "未設定(v02 から取り込み)" : user.email}</span></div>
       </section>
 
@@ -63,10 +65,11 @@ function Settings() {
           v02 の二段階認証(認証アプリのコード)でログインしています。予備のコードは引き継げなかったので、下の「二段階認証を設定する」で設定し直してください(設定し直すと、v02 のものは使わなくなります)。
         </p>
       )}
+      <ChangePassword />
       <TwoFactor enabled={user.twoFactorEnabled} />
       <Passkeys />
 
-      <ApiTokens />
+      <ApiTokens userId={user.id} />
       <ImportReport userId={user.id} />
       <Versions userId={user.id} />
       <Telemetry userId={user.id} />
@@ -77,6 +80,64 @@ function Settings() {
       </section>
       <DeleteAccount />
     </main>
+  );
+}
+
+// 表示名・ユーザー名(ログインに使う)を変える。ユーザー名の決まりと重複は Better Auth の username プラグインが確かめる
+function Profile({ name, username }: { name: string; username: string }) {
+  const router = useRouter();
+  const [v, setV] = useState({ name, username });
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const save = async () => {
+    setError("");
+    setNote("");
+    const u = v.username.trim();
+    const { error } = await authClient.updateUser({
+      ...(v.name.trim() !== name ? { name: v.name.trim() } : {}),
+      ...(u !== username ? { username: u, displayUsername: u } : {}),
+    });
+    if (error) return setError(errorText(error));
+    setNote("保存しました");
+    await router.invalidate();
+  };
+  return (
+    <form className="group form" onSubmit={(e) => (e.preventDefault(), save())}>
+      <label className="row"><span>表示名</span><input className="trail field" translate="no" maxLength={60} value={v.name} onChange={(e) => setV({ ...v, name: e.target.value })} aria-label="表示名" /></label>
+      <label className="row"><span>ユーザー名</span><input className="trail field" maxLength={40} autoComplete="username" placeholder="未設定" value={v.username} onChange={(e) => setV({ ...v, username: e.target.value })} aria-label="ユーザー名" /></label>
+      <button className="row link" type="submit" disabled={!v.name.trim() || !v.username.trim() && !!username || (v.name.trim() === name && v.username.trim() === username)}>保存</button>
+      {note && <p className="row muted" role="status">{note}</p>}
+      {error && <p className="row error" role="alert">{error}</p>}
+    </form>
+  );
+}
+
+// ログインしたままパスワードを変える(いまのパスワードで確かめる)
+function ChangePassword() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [revoke, setRevoke] = useState(true);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const submit = async () => {
+    setError("");
+    setNote("");
+    const { error } = await authClient.changePassword({ currentPassword: current, newPassword: next, revokeOtherSessions: revoke });
+    if (error) return setError(errorText(error));
+    setCurrent("");
+    setNext("");
+    setNote("パスワードを変えました");
+  };
+  return (
+    <form className="group form" onSubmit={(e) => (e.preventDefault(), submit())}>
+      <div className="row"><span>パスワード</span></div>
+      <input className="row" type="password" autoComplete="current-password" placeholder="いまのパスワード" value={current} onChange={(e) => setCurrent(e.target.value)} />
+      <input className="row" type="password" autoComplete="new-password" placeholder="新しいパスワード(10 文字以上)" value={next} onChange={(e) => setNext(e.target.value)} />
+      <label className="row"><span>ほかの端末のログインを切る</span><input className="trail" type="checkbox" checked={revoke} onChange={(e) => setRevoke(e.target.checked)} /></label>
+      <button className="capsule" type="submit" disabled={!current || next.length < 10}>パスワードを変える</button>
+      {note && <p className="row muted" role="status">{note}</p>}
+      {error && <p className="row error" role="alert">{error}</p>}
+    </form>
   );
 }
 
@@ -151,14 +212,23 @@ function Passkeys() {
     if (error) return setError(errorText(error));
     refetch();
   };
+  const rename = async (id: string, now: string) => {
+    const name = prompt("パスキーの名前(どの端末のものか分かるように)", now)?.trim().slice(0, 60);
+    if (!name || name === now) return;
+    setError("");
+    const { error } = await authClient.passkey.updatePasskey({ id, name });
+    if (error) return setError(errorText(error));
+    refetch();
+  };
 
   return (
     <section className="group">
-      <div className="row"><span>パスキー</span><span className="trail">{list?.length ?? 0} 個</span></div>
+      <div className="row"><span>パスキー</span><span className="trail">{`${list?.length ?? 0} 個`}</span></div>
       {list?.map((p) => (
         <div className="row" key={p.id}>
           <span translate="no">{p.name || "パスキー"}</span>
-          <button className="trail link danger" type="button" onClick={() => remove(p.id)}>削除</button>
+          <button className="trail link" type="button" onClick={() => rename(p.id, p.name || "パスキー")}>名前を変える</button>
+          <button className="link danger" type="button" onClick={() => remove(p.id)}>削除</button>
         </div>
       ))}
       <button className="row link" type="button" onClick={add}>パスキーを追加</button>
@@ -187,7 +257,16 @@ function ImportReport({ userId }: { userId: string }) {
         {report.library && (
           <div className="row"><span>ライブラリ・セット</span><span className="trail">{report.library.items} 件・セット {report.library.sets} 個{report.library.folders ? `・フォルダのサーバー ${report.library.folders} 台` : ""}{report.library.uploads ? `・アップロードしたもの ${report.library.uploads} 件` : ""}</span></div>
         )}
-        {[...report.skipped, ...(report.library?.skipped ?? [])].map((x, i) => (
+        {report.kinds && (
+          <div className="row"><span>データパック・リソースパック・シェーダー・Modパック(あとから)</span><span className="trail">{`${report.kinds.items + (report.kinds.uploads ?? 0)} 件`}</span></div>
+        )}
+        {report.pins && report.pins.pinned.length + report.pins.skipped.length > 0 && (
+          <div className="row"><span>セットの版の固定</span><span className="trail">{`${report.pins.pinned.length} 件`}</span></div>
+        )}
+        {report.perms && report.perms.users.length > 0 && (
+          <div className="row"><span>ユーザーごとの権限</span><span className="trail" translate="no">{report.perms.users.map((u) => u.name).join("、")}</span></div>
+        )}
+        {[...report.skipped, ...(report.library?.skipped ?? []), ...(report.kinds?.skipped ?? []), ...(report.pins?.skipped ?? []), ...(report.perms?.skipped ?? [])].map((x, i) => (
           <div className="row" key={i}><span className="main"><span>{x.what}</span><span className="muted" translate="no">{x.detail}</span></span><span className="trail">取り込まず</span></div>
         ))}
         {report.notes.map((n, i) => <p className="row muted" key={`n${i}`}>{n}</p>)}
@@ -203,7 +282,7 @@ type VersionInfo = Awaited<ReturnType<typeof getVersions>>;
 function Versions({ userId }: { userId: string }) {
   const { app } = Route.useRouteContext();
   const { can } = useCan(userId);
-  const admin = app.mode === "self" && can({ organization: ["update"] });
+  const admin = app.mode === "self" && can({ panel: ["manage"] });
   const [info, setInfo] = useState<VersionInfo | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
@@ -220,6 +299,18 @@ function Versions({ userId }: { userId: string }) {
       await new Promise((r) => setTimeout(r, 2000));
     }
     setError("再起動を待ちきれませんでした。少し待ってから開き直してください");
+  };
+  const canRestore = can({ member: ["update"] });
+  const saveAuto = async (auto: boolean, channel: "stable" | "dev") => {
+    setError("");
+    // 先に画面を変える(続けて変えたとき、前の値で上書きしないように)
+    setInfo((v) => (v ? { ...v, updates: { ...v.updates, auto, channel } } : v));
+    try {
+      await setAutoUpdate({ data: { auto, channel } });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      getVersions().then(setInfo, () => {});
+    }
   };
   const run = async (label: string, fn: () => Promise<unknown>) => {
     if (!confirm(label)) return;
@@ -260,25 +351,73 @@ function Versions({ userId }: { userId: string }) {
             )}
           </div>
         ))}
-        {info && info.releases.length === 0 && <p className="row muted">GitHub に切り替えられる版がまだありません。</p>}
+        {info?.listError && <p className="row error" role="alert">{info.listError}</p>}
+        {info && !info.listError && info.releases.length === 0 && <p className="row muted">GitHub に切り替えられる版がまだありません。</p>}
         {busy && <p className="row muted" role="status">{busy}</p>}
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
-      <p className="foot">データベースは「足すだけ」で変えていくので、前の版に戻してもデータは読めます。選んだ版が起動できなかったときは、イメージの版に自動で戻ります。</p>
+      <p className="foot">切り替える前に、パネルのバックアップを作ります(置き場所・残す数は定期バックアップの設定のもの)。データベースは「足すだけ」で変えていくので、前の版に戻してもデータは読めます。選んだ版が起動できなかったときは、イメージの版に自動で戻ります。</p>
+      {info && (
+        <>
+          <div className="group-title">自動アップデート</div>
+          <section className="group form">
+            <label className="row">
+              <span>新しい版を自動で入れる(6 時間ごとに確かめる)</span>
+              <input className="trail" type="checkbox" checked={info.updates.auto} disabled={!!busy}
+                onChange={(e) => saveAuto(e.target.checked, info.updates.channel)} />
+            </label>
+            <div className="row">
+              <span>入れる版</span>
+              <select className="trail" value={info.updates.channel} disabled={!!busy} aria-label="自動で入れる版" onChange={(e) => saveAuto(info.updates.auto, e.target.value === "dev" ? "dev" : "stable")}>
+                <option value="stable">安定版だけ</option>
+                <option value="dev">開発版も</option>
+              </select>
+            </div>
+            {info.updates.lastCheck && <div className="row muted">{`前に確かめたとき: ${new Date(info.updates.lastCheck).toLocaleString("ja-JP")}`}</div>}
+          </section>
+          <p className="foot">入れる前にパネルのバックアップを作ります。大きな版上げ(v04 など)は自動では入れません。「この更新の前に戻す」で戻した版は、自動では入れ直しません。</p>
+          {info.updates.history.length > 0 && (
+            <>
+              <div className="group-title">更新の記録</div>
+              <section className="group">
+                {info.updates.history.map((h) => (
+                  <div className="row" key={h.at}>
+                    <span className="main">
+                      <span>{`v${h.from} → v${h.to}${h.auto ? "(自動)" : ""}`}</span>
+                      <span className="muted">{`${new Date(h.at).toLocaleString("ja-JP")}${h.rolledBackAt ? " · 戻しました" : h.backup ? "" : " · バックアップなし"}`}</span>
+                    </span>
+                    {h.canRollback && canRestore && (
+                      <button className="trail link" type="button" disabled={!!busy}
+                        onClick={() => run(`v${h.from} と、この更新の前のデータに戻しますか? パネルが再起動します(今のデータは before-restore-… に残します)`, () => rollbackUpdate({ data: { at: h.at } }))}>
+                        この更新の前に戻す
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </section>
+              <p className="foot">更新の前のバックアップは、定期バックアップの「残す数」を超えると古いものから消えます。</p>
+            </>
+          )}
+        </>
+      )}
     </>
   );
 }
 
 const tokenMessage = (e: unknown) => (e instanceof Error ? e.message : "うまくいきませんでした");
 
-// API トークン(外から /api/v1 を呼ぶとき)。選んでいるチームのもので、自分の役割のとおりに動く
-function ApiTokens() {
+// API トークン(外から /api/v1 を呼ぶとき)。選んでいるチームのもので、自分の権限のとおりに動く
+function ApiTokens({ userId }: { userId: string }) {
+  const { can, perms } = useCan(userId);
+  // 自分の権限で選べる範囲だけを出す(サーバーでも確かめる。読み込むまでは役割で決める)
+  const allowed: Record<TokenScope, boolean> = perms ? { read: true, library: permsAllowScope(perms, "library"), control: permsAllowScope(perms, "control"), admin: permsAllowScope(perms, "admin") }
+    : { read: true, library: can({ library: ["edit"] }), control: can({ server: ["control"] }), admin: can({ member: ["update"] }) };
   const load = useServerFn(listTokens);
   const create = useServerFn(createToken);
   const remove = useServerFn(removeToken);
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listTokens>> | null>(null);
   const [name, setName] = useState("");
-  const [readOnly, setReadOnly] = useState(true);
+  const [scopes, setScopes] = useState<TokenScope[]>(["read"]);
   const [days, setDays] = useState(90);
   const [made, setMade] = useState("");
   const [error, setError] = useState("");
@@ -288,7 +427,7 @@ function ApiTokens() {
   const submit = async () => {
     setError("");
     try {
-      const r = await create({ data: { name, readOnly, days } });
+      const r = await create({ data: { name, scopes, days } });
       setMade(r.key);
       setName("");
       await reload();
@@ -305,7 +444,7 @@ function ApiTokens() {
           <div className="row" key={k.id}>
             <span className="main">
               <span translate="no">{k.name}</span>
-              <span className="muted"><span className="codes">{k.start}…</span> · {k.readOnly ? "読み取りだけ" : "役割のとおり"} · {k.expiresAt ? `${new Date(k.expiresAt).toLocaleDateString("ja-JP")} まで` : "期限なし"}{k.lastUsed ? ` · 最後に使った日 ${new Date(k.lastUsed).toLocaleDateString("ja-JP")}` : ""}</span>
+              <span className="muted"><span className="codes">{k.start}…</span> · {k.scopes.map((x) => SCOPE_SHORT[x]).join("・")} · {k.expiresAt ? `${new Date(k.expiresAt).toLocaleDateString("ja-JP")} まで` : "期限なし"}{k.lastUsed ? ` · 最後に使った日 ${new Date(k.lastUsed).toLocaleDateString("ja-JP")}` : ""}</span>
             </span>
             <button className="trail link danger" type="button"
               onClick={() => confirm(`トークン「${k.name}」を消しますか?(使っているスクリプトは動かなくなります)`) && remove({ data: { id: k.id } }).then(reload, (e) => setError(tokenMessage(e)))}>消す</button>
@@ -314,7 +453,11 @@ function ApiTokens() {
       </section>
       <form className="group form" onSubmit={(e) => (e.preventDefault(), submit())}>
         <input className="row" placeholder="名前(使い道。例 毎朝の更新の確認)" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
-        <label className="row"><span>読み取りだけ(入れる・起動などはできない)</span><input className="trail" type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} /></label>
+        <div className="row muted">範囲(読むことは、どのトークンでもできます)</div>
+        {TOKEN_SCOPES.filter((x) => x !== "read" && allowed[x]).map((x) => (
+          <label className="row" key={x}><span>{SCOPE_LABELS[x]}</span>
+            <input className="trail" type="checkbox" checked={scopes.includes(x)} onChange={(e) => setScopes((v) => (e.target.checked ? [...v, x] : v.filter((y) => y !== x)))} /></label>
+        ))}
         <div className="row">
           <span>期限</span>
           <select className="trail" value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label="トークンの期限">
@@ -332,7 +475,7 @@ function ApiTokens() {
         )}
         {error && <p className="row error" role="alert">{error}</p>}
       </form>
-      <p className="foot">スクリプトなどから CraftShelf を操作するときに使います(<a href="/api/v1" target="_blank" rel="noreferrer">/api/v1</a> に使える API の一覧があります)。トークンは x-api-key か Authorization: Bearer で渡します。選んでいるチームのもので、あなたの役割のとおりに動きます。</p>
+      <p className="foot">スクリプトなどから CraftShelf を操作するときに使います(使える API は<Link to="/api-docs">API の説明</Link>にあります)。トークンは x-api-key か Authorization: Bearer で渡します。選んでいるチームのもので、選んだ範囲の中で、あなたの権限(役割と、メンバーごとに足し引きした権限)のとおりに動きます。</p>
     </>
   );
 }
@@ -341,7 +484,7 @@ function ApiTokens() {
 function Telemetry({ userId }: { userId: string }) {
   const { app } = Route.useRouteContext();
   const { can } = useCan(userId);
-  const admin = app.mode === "self" && can({ member: ["update"] });
+  const admin = app.mode === "self" && can({ panel: ["manage"] });
   const set = useServerFn(setTelemetry);
   const [info, setInfo] = useState<Awaited<ReturnType<typeof telemetryInfo>> | null>(null);
   const [error, setError] = useState("");
@@ -421,41 +564,76 @@ function Feedback() {
   );
 }
 
-// 見た目(このブラウザだけ): ライト・ダーク・自動、アクセントの色、背景画像
+// 見た目: 明るさ・アクセントの色・テーマ(v02 のテーマ)・背景の暗さとぼかし(アカウントに保存)、背景画像(このブラウザだけ)
 function Appearance() {
-  const [t, setT] = useState({ mode: "auto" as Mode, accent: "blue" as Accent, background: "" });
+  const save = useServerFn(saveMyTheme);
+  const [t, setT] = useState<Theme>({ ...DEFAULT_THEME, background: "" });
   useEffect(() => { setT(getTheme()); }, []); // 保存した見た目は、読み込んだあとで読む(サーバーで作った画面と合わせるため)
   const [error, setError] = useState("");
-  const save = (next: typeof t) => {
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // 画面にはすぐ当て、アカウントへの保存は少し待ってから(つまみを動かしている間に何度も送らない)
+  const change = (next: Theme) => {
     setError("");
     try {
       saveTheme(next);
-      setT(next);
     } catch {
-      setError("背景画像が大きすぎて保存できませんでした。小さい画像を選んでください");
+      return setError("背景画像が大きすぎて保存できませんでした。小さい画像を選んでください");
     }
+    setT(next);
+    clearTimeout(timer.current);
+    const { background: _, ...saved } = next;
+    timer.current = setTimeout(() => { save({ data: saved }).catch((e) => setError(e instanceof Error ? e.message : "保存できませんでした")); }, 400);
   };
+  const preset = PRESETS[t.preset];
   return (
     <>
       <div className="group-title">見た目</div>
       <section className="group">
+        <div className="row column">
+          <span>テーマ</span>
+          <div className="themes" role="group" aria-label="テーマ">
+            {(Object.keys(PRESETS) as Preset[]).map((id) => (
+              <button key={id} type="button" className="theme-tile" aria-pressed={t.preset === id} onClick={() => change({ ...t, preset: id })}>
+                <span className="sw" style={{ background: PRESETS[id].bg ?? "radial-gradient(120% 80% at 10% 0%, #c9e4ff 0%, #eef1f7 55%, #1b2a44 100%)" }} />
+                {PRESETS[id].name}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="row">
           <span>明るさ</span>
-          <select className="trail" value={t.mode} onChange={(e) => save({ ...t, mode: e.target.value as Mode })} aria-label="明るさ">
-            <option value="auto">端末に合わせる</option>
-            <option value="light">ライト</option>
-            <option value="dark">ダーク</option>
-          </select>
+          {preset.tone ? (
+            <span className="trail">{preset.tone === "dark" ? "ダーク(テーマに合わせる)" : "ライト(テーマに合わせる)"}</span>
+          ) : (
+            <select className="trail" value={t.mode} onChange={(e) => change({ ...t, mode: e.target.value as Mode })} aria-label="明るさ">
+              <option value="auto">端末に合わせる</option>
+              <option value="light">ライト</option>
+              <option value="dark">ダーク</option>
+            </select>
+          )}
         </div>
-        <div className="row">
+        <div className="row wrap">
           <span>アクセントの色</span>
           <span className="trail seg" role="group" aria-label="アクセントの色">
-            {(Object.keys(ACCENTS) as Accent[]).map((a) => (
-              <button key={a} type="button" className={t.accent === a ? "on" : ""} aria-pressed={t.accent === a} onClick={() => save({ ...t, accent: a })}
-                style={{ borderColor: ACCENTS[a], ...(t.accent === a ? { background: ACCENTS[a] } : { color: ACCENTS[a] }) }}>{ACCENT_LABELS[a]}</button>
-            ))}
+            {(Object.keys(ACCENT_LABELS) as Accent[]).map((a) => {
+              const c = a === "auto" ? preset.accent ?? ACCENTS.blue : ACCENTS[a];
+              return (
+                <button key={a} type="button" className={t.accent === a ? "on" : ""} aria-pressed={t.accent === a} onClick={() => change({ ...t, accent: a })}
+                  style={{ borderColor: c, ...(t.accent === a ? { background: c } : { color: c }) }}>{ACCENT_LABELS[a]}</button>
+              );
+            })}
           </span>
         </div>
+        <label className="row">
+          <span>背景の暗さ</span>
+          <input className="trail" type="range" min={0} max={LIMITS.dim} value={t.dim} onChange={(e) => change({ ...t, dim: Number(e.target.value) })} aria-label="背景の暗さ" />
+          <span className="muted">{`${t.dim}%`}</span>
+        </label>
+        <label className="row">
+          <span>背景のぼかし</span>
+          <input className="trail" type="range" min={0} max={LIMITS.blur} value={t.blur} onChange={(e) => change({ ...t, blur: Number(e.target.value) })} aria-label="背景のぼかし" />
+          <span className="muted">{`${t.blur}px`}</span>
+        </label>
         <label className="row link">
           {t.background ? "背景画像を変える" : "背景画像を選ぶ"}
           <input type="file" accept="image/*" hidden onChange={async (e) => {
@@ -463,16 +641,16 @@ function Appearance() {
             e.target.value = "";
             if (!f) return;
             try {
-              save({ ...t, background: await backgroundFrom(f) });
+              change({ ...t, background: await backgroundFrom(f) });
             } catch {
               setError("画像を読めませんでした");
             }
           }} />
         </label>
-        {t.background && <button className="row link danger" type="button" onClick={() => save({ ...t, background: "" })}>背景画像を外す</button>}
+        {t.background && <button className="row link danger" type="button" onClick={() => change({ ...t, background: "" })}>背景画像を外す</button>}
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
-      <p className="foot">見た目は、このブラウザだけに保存します(背景画像はサーバーに送りません)。</p>
+      <p className="foot">見た目はアカウントに保存し、どの端末でも同じになります。背景画像だけは、このブラウザに置きます(サーバーに送りません。テーマの背景の代わりに使います)。</p>
     </>
   );
 }

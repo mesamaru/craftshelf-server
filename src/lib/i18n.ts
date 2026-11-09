@@ -24,6 +24,7 @@ export function translate(s: string): string {
   if (!JA.test(s)) return s;
   const t = s.trim();
   if (t in EN_WHOLE) return s.replace(t, EN_WHOLE[t]);
+  if (Object.hasOwn(EN, t)) return s.replace(t, EN[t]); // 文全体が辞書にあれば、数字の規則より先に当てる(「1 台」などが先に訳されて辞書と合わなくなるため)
   re ??= new RegExp(Object.keys(EN).sort((a, b) => b.length - a.length).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
   for (const [r, to] of EN_RULES) s = s.replace(r, to as never);
   s = s.replace(re, (m) => EN[m]);
@@ -33,23 +34,32 @@ export function translate(s: string): string {
 
 const ATTRS = ["placeholder", "title", "aria-label"];
 const skip = (el: Element | null) => !!el?.closest("[translate=no], script, style, textarea, code");
+// 属性(placeholder など)は入力欄でも訳す。中身(textarea の文字)は訳さない
+const skipAttr = (el: Element | null) => !!el?.closest("[translate=no], script, style, code");
+
+// サーバーで描いた画面を React が受け取る(ハイドレーション)前に文字を書き換えると、食い違いのエラー(React #418)になる。
+// React は受け取った要素に印(__reactFiber$…)を付けるので、まだのところは飛ばし(pending)、受け取り終わってから訳す
+let pending = false;
+const hydrated = (el: Element | null) => !!el && Object.keys(el).some((k) => k.startsWith("__reactFiber$"));
 
 // 同じ値を書き戻すと監視がまた反応して繰り返すので、変わるときだけ書き換える
 function textNode(n: Node) {
   const v = n.nodeValue;
   if (!v || !JA.test(v) || skip(n.parentElement)) return;
+  if (!hydrated(n.parentElement)) return void (pending = true);
   const t = translate(v);
   if (t !== v) n.nodeValue = t;
 }
 function attr(el: Element, a: string) {
   const v = el.getAttribute(a);
-  if (!v || !JA.test(v) || skip(el)) return;
+  if (!v || !JA.test(v) || skipAttr(el)) return;
+  if (!hydrated(el)) return void (pending = true);
   const t = translate(v);
   if (t !== v) el.setAttribute(a, t);
 }
 function tree(root: Node) {
   if (root.nodeType === Node.TEXT_NODE) return textNode(root);
-  if (!(root instanceof Element) || skip(root)) return;
+  if (!(root instanceof Element) || skipAttr(root)) return;
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   while (w.nextNode()) textNode(w.currentNode);
   for (const el of [root, ...root.querySelectorAll(ATTRS.map((a) => `[${a}]`).join(","))]) for (const a of ATTRS) attr(el, a);
@@ -69,5 +79,12 @@ export function startEnglish() {
       else m.addedNodes.forEach(tree);
     }
   }).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ATTRS });
-  tree(document.body);
+  // まだ受け取っていないところ(あとから読み込む画面の部品)があれば、受け取り終わるまで見直す(15 秒まで)
+  const until = Date.now() + 15_000;
+  const scan = () => {
+    pending = false;
+    tree(document.body);
+    if (pending && Date.now() < until) setTimeout(scan, 100);
+  };
+  scan();
 }

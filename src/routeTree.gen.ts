@@ -11,9 +11,12 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ActivityRouteImport } from './routes/activity'
+import { Route as ApiDocsRouteImport } from './routes/api-docs'
 import { Route as BackupRouteImport } from './routes/backup'
+import { Route as CleanupRouteImport } from './routes/cleanup'
 import { Route as CompareRouteImport } from './routes/compare'
 import { Route as ForgotRouteImport } from './routes/forgot'
+import { Route as JobsRouteImport } from './routes/jobs'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as PortsRouteImport } from './routes/ports'
 import { Route as PrivacyRouteImport } from './routes/privacy'
@@ -40,9 +43,11 @@ import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as ApiBackupNameRouteImport } from './routes/api/backup/$name'
 import { Route as ApiBackupRestoreRouteImport } from './routes/api/backup/restore'
 import { Route as ApiLibraryUploadRouteImport } from './routes/api/library/upload'
+import { Route as ApiLibraryZipRouteImport } from './routes/api/library/zip'
 import { Route as ApiV1SplatRouteImport } from './routes/api/v1/$'
 import { Route as ServersIdFilesRouteImport } from './routes/servers_.$id_.files'
 import { Route as ApiLibraryFilesIdRouteImport } from './routes/api/library/files.$id'
+import { Route as ApiWorldsIdNameRouteImport } from './routes/api/worlds/$id.$name'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -54,9 +59,19 @@ const ActivityRoute = ActivityRouteImport.update({
   path: '/activity',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiDocsRoute = ApiDocsRouteImport.update({
+  id: '/api-docs',
+  path: '/api-docs',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BackupRoute = BackupRouteImport.update({
   id: '/backup',
   path: '/backup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CleanupRoute = CleanupRouteImport.update({
+  id: '/cleanup',
+  path: '/cleanup',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CompareRoute = CompareRouteImport.update({
@@ -67,6 +82,11 @@ const CompareRoute = CompareRouteImport.update({
 const ForgotRoute = ForgotRouteImport.update({
   id: '/forgot',
   path: '/forgot',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const JobsRoute = JobsRouteImport.update({
+  id: '/jobs',
+  path: '/jobs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -199,6 +219,11 @@ const ApiLibraryUploadRoute = ApiLibraryUploadRouteImport.update({
   path: '/api/library/upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiLibraryZipRoute = ApiLibraryZipRouteImport.update({
+  id: '/api/library/zip',
+  path: '/api/library/zip',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1SplatRoute = ApiV1SplatRouteImport.update({
   id: '/api/v1/$',
   path: '/api/v1/$',
@@ -214,13 +239,21 @@ const ApiLibraryFilesIdRoute = ApiLibraryFilesIdRouteImport.update({
   path: '/api/library/files/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiWorldsIdNameRoute = ApiWorldsIdNameRouteImport.update({
+  id: '/api/worlds/$id/$name',
+  path: '/api/worlds/$id/$name',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
+  '/api-docs': typeof ApiDocsRoute
   '/backup': typeof BackupRoute
+  '/cleanup': typeof CleanupRoute
   '/compare': typeof CompareRoute
   '/forgot': typeof ForgotRoute
+  '/jobs': typeof JobsRoute
   '/login': typeof LoginRoute
   '/ports': typeof PortsRoute
   '/privacy': typeof PrivacyRoute
@@ -247,16 +280,21 @@ export interface FileRoutesByFullPath {
   '/api/backup/$name': typeof ApiBackupNameRoute
   '/api/backup/restore': typeof ApiBackupRestoreRoute
   '/api/library/upload': typeof ApiLibraryUploadRoute
+  '/api/library/zip': typeof ApiLibraryZipRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/servers/$id/files': typeof ServersIdFilesRoute
   '/api/library/files/$id': typeof ApiLibraryFilesIdRoute
+  '/api/worlds/$id/$name': typeof ApiWorldsIdNameRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
+  '/api-docs': typeof ApiDocsRoute
   '/backup': typeof BackupRoute
+  '/cleanup': typeof CleanupRoute
   '/compare': typeof CompareRoute
   '/forgot': typeof ForgotRoute
+  '/jobs': typeof JobsRoute
   '/login': typeof LoginRoute
   '/ports': typeof PortsRoute
   '/privacy': typeof PrivacyRoute
@@ -283,17 +321,22 @@ export interface FileRoutesByTo {
   '/api/backup/$name': typeof ApiBackupNameRoute
   '/api/backup/restore': typeof ApiBackupRestoreRoute
   '/api/library/upload': typeof ApiLibraryUploadRoute
+  '/api/library/zip': typeof ApiLibraryZipRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/servers/$id/files': typeof ServersIdFilesRoute
   '/api/library/files/$id': typeof ApiLibraryFilesIdRoute
+  '/api/worlds/$id/$name': typeof ApiWorldsIdNameRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
+  '/api-docs': typeof ApiDocsRoute
   '/backup': typeof BackupRoute
+  '/cleanup': typeof CleanupRoute
   '/compare': typeof CompareRoute
   '/forgot': typeof ForgotRoute
+  '/jobs': typeof JobsRoute
   '/login': typeof LoginRoute
   '/ports': typeof PortsRoute
   '/privacy': typeof PrivacyRoute
@@ -320,18 +363,23 @@ export interface FileRoutesById {
   '/api/backup/$name': typeof ApiBackupNameRoute
   '/api/backup/restore': typeof ApiBackupRestoreRoute
   '/api/library/upload': typeof ApiLibraryUploadRoute
+  '/api/library/zip': typeof ApiLibraryZipRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/servers_/$id_/files': typeof ServersIdFilesRoute
   '/api/library/files/$id': typeof ApiLibraryFilesIdRoute
+  '/api/worlds/$id/$name': typeof ApiWorldsIdNameRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/activity'
+    | '/api-docs'
     | '/backup'
+    | '/cleanup'
     | '/compare'
     | '/forgot'
+    | '/jobs'
     | '/login'
     | '/ports'
     | '/privacy'
@@ -358,16 +406,21 @@ export interface FileRouteTypes {
     | '/api/backup/$name'
     | '/api/backup/restore'
     | '/api/library/upload'
+    | '/api/library/zip'
     | '/api/v1/$'
     | '/servers/$id/files'
     | '/api/library/files/$id'
+    | '/api/worlds/$id/$name'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/activity'
+    | '/api-docs'
     | '/backup'
+    | '/cleanup'
     | '/compare'
     | '/forgot'
+    | '/jobs'
     | '/login'
     | '/ports'
     | '/privacy'
@@ -394,16 +447,21 @@ export interface FileRouteTypes {
     | '/api/backup/$name'
     | '/api/backup/restore'
     | '/api/library/upload'
+    | '/api/library/zip'
     | '/api/v1/$'
     | '/servers/$id/files'
     | '/api/library/files/$id'
+    | '/api/worlds/$id/$name'
   id:
     | '__root__'
     | '/'
     | '/activity'
+    | '/api-docs'
     | '/backup'
+    | '/cleanup'
     | '/compare'
     | '/forgot'
+    | '/jobs'
     | '/login'
     | '/ports'
     | '/privacy'
@@ -430,17 +488,22 @@ export interface FileRouteTypes {
     | '/api/backup/$name'
     | '/api/backup/restore'
     | '/api/library/upload'
+    | '/api/library/zip'
     | '/api/v1/$'
     | '/servers_/$id_/files'
     | '/api/library/files/$id'
+    | '/api/worlds/$id/$name'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ActivityRoute: typeof ActivityRoute
+  ApiDocsRoute: typeof ApiDocsRoute
   BackupRoute: typeof BackupRoute
+  CleanupRoute: typeof CleanupRoute
   CompareRoute: typeof CompareRoute
   ForgotRoute: typeof ForgotRoute
+  JobsRoute: typeof JobsRoute
   LoginRoute: typeof LoginRoute
   PortsRoute: typeof PortsRoute
   PrivacyRoute: typeof PrivacyRoute
@@ -467,9 +530,11 @@ export interface RootRouteChildren {
   ApiBackupNameRoute: typeof ApiBackupNameRoute
   ApiBackupRestoreRoute: typeof ApiBackupRestoreRoute
   ApiLibraryUploadRoute: typeof ApiLibraryUploadRoute
+  ApiLibraryZipRoute: typeof ApiLibraryZipRoute
   ApiV1SplatRoute: typeof ApiV1SplatRoute
   ServersIdFilesRoute: typeof ServersIdFilesRoute
   ApiLibraryFilesIdRoute: typeof ApiLibraryFilesIdRoute
+  ApiWorldsIdNameRoute: typeof ApiWorldsIdNameRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -488,11 +553,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ActivityRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api-docs': {
+      id: '/api-docs'
+      path: '/api-docs'
+      fullPath: '/api-docs'
+      preLoaderRoute: typeof ApiDocsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/backup': {
       id: '/backup'
       path: '/backup'
       fullPath: '/backup'
       preLoaderRoute: typeof BackupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cleanup': {
+      id: '/cleanup'
+      path: '/cleanup'
+      fullPath: '/cleanup'
+      preLoaderRoute: typeof CleanupRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/compare': {
@@ -507,6 +586,13 @@ declare module '@tanstack/react-router' {
       path: '/forgot'
       fullPath: '/forgot'
       preLoaderRoute: typeof ForgotRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/jobs': {
+      id: '/jobs'
+      path: '/jobs'
+      fullPath: '/jobs'
+      preLoaderRoute: typeof JobsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -691,6 +777,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiLibraryUploadRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/library/zip': {
+      id: '/api/library/zip'
+      path: '/api/library/zip'
+      fullPath: '/api/library/zip'
+      preLoaderRoute: typeof ApiLibraryZipRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/$': {
       id: '/api/v1/$'
       path: '/api/v1/$'
@@ -712,15 +805,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiLibraryFilesIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/worlds/$id/$name': {
+      id: '/api/worlds/$id/$name'
+      path: '/api/worlds/$id/$name'
+      fullPath: '/api/worlds/$id/$name'
+      preLoaderRoute: typeof ApiWorldsIdNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ActivityRoute: ActivityRoute,
+  ApiDocsRoute: ApiDocsRoute,
   BackupRoute: BackupRoute,
+  CleanupRoute: CleanupRoute,
   CompareRoute: CompareRoute,
   ForgotRoute: ForgotRoute,
+  JobsRoute: JobsRoute,
   LoginRoute: LoginRoute,
   PortsRoute: PortsRoute,
   PrivacyRoute: PrivacyRoute,
@@ -747,9 +850,11 @@ const rootRouteChildren: RootRouteChildren = {
   ApiBackupNameRoute: ApiBackupNameRoute,
   ApiBackupRestoreRoute: ApiBackupRestoreRoute,
   ApiLibraryUploadRoute: ApiLibraryUploadRoute,
+  ApiLibraryZipRoute: ApiLibraryZipRoute,
   ApiV1SplatRoute: ApiV1SplatRoute,
   ServersIdFilesRoute: ServersIdFilesRoute,
   ApiLibraryFilesIdRoute: ApiLibraryFilesIdRoute,
+  ApiWorldsIdNameRoute: ApiWorldsIdNameRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

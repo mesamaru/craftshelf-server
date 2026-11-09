@@ -1,15 +1,15 @@
 // v02 のデータの取り込み: v02 と同じ形のデータベースを作り、取り込んで、v02 の人がそのままログインできるか
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { signupOpen } from "~/server/auth";
 import { addonSet, addonSetItem, libraryFile, libraryItem, localServer, pteroConnection, server, serverProfile, storageTarget } from "~/server/db/schema";
 import * as schema from "~/server/db/schema";
-import { maybeImportV02, maybeImportV02Library, type ImportReport } from "~/server/import-v02";
+import { maybeImportV02, maybeImportV02AutoUpdate, maybeImportV02Backups, maybeImportV02Channels, maybeImportV02Kinds, maybeImportV02Library, maybeImportV02Perms, maybeImportV02Pins, maybeImportV02Prefs, maybeImportV02Saved, maybeImportV02Schedules, maybeImportV02Software, type ImportReport } from "~/server/import-v02";
 import { totpCode } from "~/server/legacy";
 import { open } from "~/server/secrets";
 import { TEST_SECRET, setup } from "./helpers";
@@ -43,6 +43,8 @@ function makeV02(dir: string) {
   user.run("Owner", V02.scrypt, "admin", "2025-01-02T03:04:05Z", "[]", "", 0);
   user.run("編集者", V02.pbkdf2, "editor", "2025-02-01T00:00:00Z", "[\"storage\"]", TOTP, 1);
   user.run("viewer", V02.scrypt, "viewer", "2025-03-01T00:00:00Z", "[]", "", 0);
+  d.prepare("UPDATE users SET prefs=? WHERE username='Owner'").run(JSON.stringify({ theme: "nether", bg_dim: 30, bg_blur: 8, skin: "glass" }));
+  d.prepare("UPDATE users SET prefs=? WHERE username='viewer'").run(JSON.stringify({ theme: "mint" }));
   d.exec("ALTER TABLE users ADD COLUMN ptero_servers TEXT");
   d.prepare("UPDATE users SET ptero_servers=? WHERE username='viewer'").run(JSON.stringify(["abcd1234"])); // v02.23 の割り当て
   const set = d.prepare("INSERT INTO settings (key, value) VALUES (?,?)");
@@ -57,21 +59,45 @@ function makeV02(dir: string) {
   d.prepare("UPDATE servers SET root_dir=?, control='command', start_cmd='./start.sh', rcon_port=25575 WHERE identifier='local-1'").run(mkdtempSync(join(tmpdir(), "cs-v02srv-")));
   d.prepare("UPDATE servers SET root_dir=? WHERE identifier='local-2'").run(join(tmpdir(), "cs-no-such-folder-x"));
   d.exec("INSERT INTO passkeys VALUES (1, 1, 'x'); ");
+  d.exec("ALTER TABLE servers ADD COLUMN auto_update TEXT NOT NULL DEFAULT 'off'"); // 01.17 の自動更新
+  d.exec("UPDATE servers SET auto_update='auto' WHERE identifier IN ('abcd1234', 'local-1', 'local-2')");
+  // 01.17 のワールドのバックアップ(曜日は月曜 = 0)と、パネルの定期バックアップ(置き場所 = 保存先 1)
+  for (const col of ["world_mode TEXT NOT NULL DEFAULT 'off'", "world_time TEXT NOT NULL DEFAULT '05:00'", "world_dow INTEGER NOT NULL DEFAULT 0", "world_keep INTEGER NOT NULL DEFAULT 5"]) d.exec(`ALTER TABLE servers ADD COLUMN ${col}`);
+  d.exec("UPDATE servers SET world_mode='weekly', world_time='03:30', world_dow=0, world_keep=3 WHERE identifier='local-1'");
+  d.exec("UPDATE servers SET world_mode='daily' WHERE identifier='abcd1234'");
+  // 予約同期(曜日は月曜 = 0。再起動は既定でする)
+  for (const col of ["sched_mode TEXT NOT NULL DEFAULT 'off'", "sched_time TEXT NOT NULL DEFAULT '04:00'", "sched_dow INTEGER NOT NULL DEFAULT 0", "sched_restart INTEGER NOT NULL DEFAULT 1"]) d.exec(`ALTER TABLE servers ADD COLUMN ${col}`);
+  d.exec("UPDATE servers SET sched_mode='weekly', sched_time='02:15', sched_dow=6, sched_restart=0 WHERE identifier='local-1'");
+  d.exec("UPDATE servers SET sched_mode='daily' WHERE identifier='abcd1234'");
+  set.run("backup_target_id", "1");
+  set.run("backup_keep", "7");
   // 保存先: 1 = パネルの中 / 2 = SMB(v03 はまだつなげない)。自作は 1 に、NASだけ は 2 にだけ版がある
   d.exec(`
     INSERT INTO storage_targets (name, protocol, server, share, active) VALUES ('パネルの中', 'local', '', '', 1), ('家の NAS', 'smb', 'nas.example.test', 'share', 0);
     INSERT INTO versions (item_id, target_id, version, filename, relpath, size, sha256, meta, added_at) VALUES
       (1, 1, '5.4', 'LuckPerms-5.4.jar', 'plugin/LuckPerms/LuckPerms-5.4.jar', 10, 'aaa', '{}', '2025-01-01'),
       (4, 1, '1.0', 'Jisaku-1.0.jar', 'plugin/自作/Jisaku-1.0.jar', 20, 'bbb', '{"loader":"Bukkit / Spigot / Paper"}', '2025-02-01'),
-      (7, 2, '2.0', 'NasOnly.jar', 'plugin/NasOnly/NasOnly.jar', 30, 'ccc', '{}', '2025-03-01');
+      (7, 2, '2.0', 'NasOnly.jar', 'plugin/NasOnly/NasOnly.jar', 30, 'ccc', '{}', '2025-03-01'),
+      (8, 1, '1.0', 'Tex-1.0.zip', 'resourcepack/テクスチャ/Tex-1.0.zip', 5, 'ddd', '{}', '2025-04-01'),
+      (1, 1, '5.3', 'LuckPerms-5.3.jar', 'plugin/LuckPerms/LuckPerms-5.3.jar', 10, 'eee', '{}', '2025-01-01'),
+      (3, 1, '0.1', 'lithium-0.1.jar', 'mod/Lithium/lithium-0.1.jar', 10, 'fff', '{}', '2025-01-01');
+    ALTER TABLE versions ADD COLUMN sha1 TEXT NOT NULL DEFAULT '';
+    UPDATE versions SET sha1='${'a'.repeat(40)}' WHERE id=5;
+    UPDATE versions SET sha1='${'b'.repeat(40)}' WHERE id=6;
   `);
-  // 1 = Modrinth のプラグイン / 2 = 別の人が持つ同じプラグイン / 3 = Modrinth の Mod / 4 = アップロードしただけ / 5 = SpigotMC / 6 = データパック
+  // 1 = Modrinth のプラグイン / 2 = 別の人が持つ同じプラグイン / 3 = Modrinth の Mod / 4 = アップロードしただけ / 5 = SpigotMC / 6 = Modrinth のデータパック / 8 = アップロードしたリソースパック
   d.exec(`
-    INSERT INTO items (category, name, owner_id) VALUES ('plugin','LuckPerms',1),('plugin','LuckPerms',2),('mod','Lithium',1),('plugin','自作',1),('plugin','EssentialsX',1),('datapack','村人',1),('plugin','NASだけ',1);
+    INSERT INTO items (category, name, owner_id) VALUES ('plugin','LuckPerms',1),('plugin','LuckPerms',2),('mod','Lithium',1),('plugin','自作',1),('plugin','EssentialsX',1),('datapack','村人',1),('plugin','NASだけ',1),('resourcepack','テクスチャ',1);
     INSERT INTO item_sources VALUES (1,'modrinth','Vebnzrzj','LuckPerms','https://modrinth.com/plugin/luckperms'),(2,'modrinth','Vebnzrzj','LuckPerms',''),
-      (3,'modrinth','gvQqBUqZ','Lithium','https://modrinth.com/mod/lithium'),(5,'spigot','9089','EssentialsX','');
+      (3,'modrinth','gvQqBUqZ','Lithium','https://modrinth.com/mod/lithium'),(5,'spigot','9089','EssentialsX',''),
+      (6,'modrinth','MURABITO','村人','https://modrinth.com/datapack/murabito');
     INSERT INTO sets (name, owner_id) VALUES ('ロビー', 1);
-    INSERT INTO set_items VALUES (1,1,2),(1,3,NULL),(1,4,NULL);
+    INSERT INTO set_items VALUES (1,1,5),(1,3,6),(1,4,2),(1,6,NULL);
+    ALTER TABLE item_sources ADD COLUMN channel TEXT NOT NULL DEFAULT '';
+    UPDATE item_sources SET channel='release' WHERE item_id=3;
+    INSERT INTO settings (key, value) VALUES ('stable_only', '0'), ('auto_download', '1');
+    ALTER TABLE items ADD COLUMN keep_versions INTEGER NOT NULL DEFAULT 0;
+    UPDATE items SET keep_versions=3 WHERE id=4;
   `);
   d.close();
   writeFileSync(join(dir, "secret.key"), V02.fernetKey);
@@ -171,11 +197,13 @@ describe("v02 のライブラリ・セットの取り込み", () => {
       { title: "LuckPerms", type: "plugin", source: "modrinth", slug: "luckperms" }, // 2 人が持っていても 1 件
       { title: "自作", type: "plugin", source: "upload", slug: "" }, // アップロードしたもの(v02 の保存先のファイルを指す)
       { title: "NASだけ", type: "plugin", source: "upload", slug: "" }, // SMB の保存先のもの
+      { title: "村人", type: "datapack", source: "modrinth", slug: "murabito" }, // データパックなども(03.58.00 から)
+      { title: "テクスチャ", type: "resourcepack", source: "upload", slug: "" },
     ].sort((a, b) => a.title.localeCompare(b.title)));
     const sets = await t.db.select({ name: addonSet.name, item: libraryItem.title }).from(addonSet)
       .innerJoin(addonSetItem, eq(addonSetItem.setId, addonSet.id)).innerJoin(libraryItem, eq(libraryItem.id, addonSetItem.itemId));
-    expect(sets.map((x) => `${x.name}:${x.item}`).sort()).toEqual(["ロビー:Lithium", "ロビー:LuckPerms", "ロビー:自作"]);
-    expect([r.items, r.sets, r.uploads]).toEqual([3, 1, 2]);
+    expect(sets.map((x) => `${x.name}:${x.item}`).sort()).toEqual(["ロビー:Lithium", "ロビー:LuckPerms", "ロビー:村人", "ロビー:自作"]);
+    expect([r.items, r.sets, r.uploads]).toEqual([4, 1, 3]);
     const skipped = Object.fromEntries(r.skipped.map((x) => [x.what, x.detail]));
     expect(skipped["ライブラリの 1 件"]).toBeUndefined();
     const files = await t.db.select({ key: libraryFile.storageKey, loaders: libraryFile.loaders, kind: storageTarget.kind, target: storageTarget.summary })
@@ -183,14 +211,34 @@ describe("v02 のライブラリ・セットの取り込み", () => {
     expect(files.sort((a, b) => a.key.localeCompare(b.key))).toEqual([
       { key: "library/plugin/NasOnly/NasOnly.jar", loaders: "[]", kind: "smb", target: "\\\\nas.example.test\\share" },
       { key: "library/plugin/自作/Jisaku-1.0.jar", loaders: JSON.stringify(["bukkit", "spigot", "paper", "purpur"]), kind: "local", target: `${v03Dir}(v02 のパネルの中)` },
+      { key: "library/resourcepack/テクスチャ/Tex-1.0.zip", loaders: "[]", kind: "local", target: `${v03Dir}(v02 のパネルの中)` },
     ]);
-    expect(skipped["データパックなど(1 件)"]).toContain("村人");
-    expect(skipped["セットの版の固定(1 件)"]).toBeTruthy();
+    expect(Object.keys(skipped).filter((k) => k.startsWith("種類のわからないもの"))).toEqual([]);
   });
 
   it("v02 のデータには書き込まない。二度目は取り込まない", async () => {
     expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
     expect(await maybeImportV02Library(t.db, { v02Dir, v03Dir })).toBeNull();
+  });
+
+  it("03.57.00 までに取り込んだパネルでは、データパックなどを一度だけあとから取り込み、同じ名前のセットにも足す", async () => {
+    const opts = { v02Dir, v03Dir, secret: TEST_SECRET, dataDir: v03Dir };
+    expect(await maybeImportV02Kinds(t.db, opts)).toBeNull(); // ライブラリと一緒に取り込んだので、しない
+    // 03.57.00 までの取り込みのあと(データパックなどが無く、印も無い)にする
+    await t.db.delete(libraryItem).where(inArray(libraryItem.projectType, ["datapack", "resourcepack"]));
+    rmSync(join(v03Dir, "import-v02-kinds.json"));
+    const before = { targets: (await t.db.select().from(storageTarget)).length, sets: (await t.db.select().from(addonSet)).length };
+    const r = (await maybeImportV02Kinds(t.db, opts))!;
+    expect([r.items, r.uploads]).toEqual([1, 1]);
+    const items = await t.db.select({ title: libraryItem.title, type: libraryItem.projectType }).from(libraryItem).where(inArray(libraryItem.projectType, ["datapack", "resourcepack"]));
+    expect(items.map((i) => `${i.title}:${i.type}`).sort()).toEqual(["テクスチャ:resourcepack", "村人:datapack"]);
+    const sets = await t.db.select({ name: addonSet.name, item: libraryItem.title }).from(addonSet)
+      .innerJoin(addonSetItem, eq(addonSetItem.setId, addonSet.id)).innerJoin(libraryItem, eq(libraryItem.id, addonSetItem.itemId));
+    expect(sets.map((x) => `${x.name}:${x.item}`).sort()).toEqual(["ロビー:Lithium", "ロビー:LuckPerms", "ロビー:村人", "ロビー:自作"]);
+    // 保存先・セットは前に取り込んだものを使う(2 つ目を作らない)
+    expect({ targets: (await t.db.select().from(storageTarget)).length, sets: (await t.db.select().from(addonSet)).length }).toEqual(before);
+    expect(await maybeImportV02Kinds(t.db, opts)).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
   });
 });
 
@@ -202,5 +250,147 @@ describe("v02 のフォルダのサーバーの取り込み", () => {
     const [row] = await t.db.select({ name: server.name, control: localServer.control, start: localServer.startCmd, rcon: localServer.rconPort, platform: serverProfile.platform })
       .from(localServer).innerJoin(server, eq(localServer.serverId, server.id)).leftJoin(serverProfile, eq(serverProfile.serverId, server.id));
     expect(row).toEqual({ name: "家のサーバー", control: "command", start: "./start.sh", rcon: 25575, platform: "fabric" });
+  });
+});
+
+describe("v02 の自動更新の取り込み", () => {
+  it("自動更新をオンにしていたサーバーを、Pterodactyl は識別子・フォルダはフォルダの場所で探してオンにする。一度だけ", async () => {
+    const r = (await maybeImportV02AutoUpdate(t.db, { v02Dir, v03Dir, dataDir: v03Dir }))!;
+    expect(r.servers).toEqual(["サバイバル", "家のサーバー"]); // 消えたサーバーは取り込んでいない
+    const on = await t.db.select({ name: server.name }).from(server).where(eq(server.autoUpdate, true));
+    expect(on.map((x) => x.name).sort()).toEqual(["サバイバル", "家のサーバー"].sort());
+    expect(await maybeImportV02AutoUpdate(t.db, { v02Dir, v03Dir, dataDir: v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 のバックアップの設定の取り込み", () => {
+  it("パネルの定期バックアップと、ワールドのバックアップの予約を引き継ぐ(置き場所は取り込んだ保存先。曜日を v03 の数え方に)。一度だけ", async () => {
+    const r = (await maybeImportV02Backups(t.db, { v02Dir, v03Dir, dataDir: v03Dir }))!;
+    expect(r).toMatchObject({ panel: true, worlds: ["サバイバル", "家のサーバー"] });
+    const [target] = await t.db.select().from(storageTarget).where(eq(storageTarget.name, "v02: パネルの中"));
+    const [panel] = await t.db.select().from(schema.backupSchedule);
+    expect(panel).toMatchObject({ enabled: true, keep: 7, time: "04:00", targetId: target.id });
+    const rows = await t.db.select({ name: server.name, w: schema.worldBackup }).from(schema.worldBackup).innerJoin(server, eq(schema.worldBackup.serverId, server.id));
+    expect(rows.find((x) => x.name === "家のサーバー")?.w).toMatchObject({ mode: "weekly", time: "03:30", dow: 1, keep: 3, targetId: target.id });
+    expect(rows.find((x) => x.name === "サバイバル")?.w).toMatchObject({ mode: "daily", time: "05:00", targetId: null });
+    expect(await maybeImportV02Backups(t.db, { v02Dir, v03Dir, dataDir: v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 のサーバー本体の種類の取り込み", () => {
+  it("v03 のサーバーの種類だけでは分からない種類(Waterfall など)を引き継ぐ。一度だけ", async () => {
+    const r = (await maybeImportV02Software(t.db, { v02Dir, v03Dir, dataDir: v03Dir }))!;
+    expect(r.servers).toEqual(["プロキシ"]);
+    const rows = await t.db.select({ name: server.name, sw: schema.serverSoftware.software }).from(schema.serverSoftware).innerJoin(server, eq(schema.serverSoftware.serverId, server.id));
+    expect(rows).toEqual([{ name: "プロキシ", sw: "waterfall" }]);
+    expect(await maybeImportV02Software(t.db, { v02Dir, v03Dir, dataDir: v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 のサーバーごとの予約の取り込み", () => {
+  it("予約同期を、入っているものを最新にする予約として引き継ぐ(曜日を v03 の数え方に・再起動するか)。一度だけ", async () => {
+    const r = (await maybeImportV02Schedules(t.db, { v02Dir, v03Dir, dataDir: v03Dir }))!;
+    expect(r.servers).toEqual(["サバイバル", "家のサーバー"]);
+    const rows = await t.db.select({ name: server.name, s: schema.serverSchedule }).from(schema.serverSchedule).innerJoin(server, eq(schema.serverSchedule.serverId, server.id));
+    expect(rows.find((x) => x.name === "家のサーバー")?.s).toMatchObject({ mode: "weekly", action: "update", time: "02:15", dow: 0, restart: false });
+    expect(rows.find((x) => x.name === "サバイバル")?.s).toMatchObject({ mode: "daily", action: "update", time: "04:00", restart: true });
+    expect(await maybeImportV02Schedules(t.db, { v02Dir, v03Dir, dataDir: v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 の受け取る版の取り込み", () => {
+  it("全体の「ベータ版も」をチームの既定に、アイテムごとの設定をライブラリのものに引き継ぐ。一度だけ", async () => {
+    const r = (await maybeImportV02Channels(t.db, { v02Dir, v03Dir }))!;
+    expect(r).toMatchObject({ team: "all", items: ["Lithium"] });
+    const [opt] = await t.db.select().from(schema.teamOption);
+    expect(opt.channel).toBe("all");
+    const items = await t.db.select({ title: libraryItem.title, channel: libraryItem.channel }).from(libraryItem);
+    expect(items.find((i) => i.title === "Lithium")?.channel).toBe("release");
+    expect(items.find((i) => i.title === "LuckPerms")?.channel).toBe("");
+    expect(await maybeImportV02Channels(t.db, { v02Dir, v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 の見た目の取り込み", () => {
+  it("テーマ・背景の暗さとぼかしを、その人のアカウントに引き継ぐ(何も選んでいない人は v02 の初めのオーロラ)。一度だけ", async () => {
+    const r = (await maybeImportV02Prefs(t.db, { v02Dir, v03Dir }))!;
+    expect(r.users.sort()).toEqual(["Owner", "viewer", "編集者"].sort());
+    const rows = await t.db.select({ name: schema.user.name, theme: schema.userPref.theme }).from(schema.userPref).innerJoin(schema.user, eq(schema.userPref.userId, schema.user.id));
+    const of = (n: string) => JSON.parse(rows.find((x) => x.name === n)!.theme!);
+    expect(of("Owner")).toEqual({ mode: "auto", accent: "auto", preset: "nether", dim: 30, blur: 8 });
+    expect(of("編集者")).toMatchObject({ preset: "aurora", dim: 0, blur: 0 });
+    expect(of("viewer")).toMatchObject({ preset: "standard" });
+    expect(await maybeImportV02Prefs(t.db, { v02Dir, v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 のセットの版の固定の取り込み", () => {
+  it("v02 の版(ファイル)を v03 の配布元の版に対応させて固定する(Modrinth は SHA-1・アップロードしたものは SHA-256)。対応が取れないものは理由を残す。一度だけ", async () => {
+    const asked: string[] = [];
+    const fake = async (url: string, init?: RequestInit) => {
+      asked.push(url);
+      if (url === "https://api.modrinth.com/v2/version_files") {
+        const { hashes } = JSON.parse(String(init?.body));
+        return Response.json(Object.fromEntries(hashes.filter((h: string) => h === "a".repeat(40)).map((h: string) => [h, { id: "LP053xxx", project_id: "Vebnzrzj", version_number: "5.3" }])));
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const r = (await maybeImportV02Pins(t.db, { v02Dir, v03Dir, secret: TEST_SECRET, fetch: fake }))!;
+    expect(r.pinned.sort()).toEqual(["ロビー / LuckPerms 5.3", "ロビー / 自作 1.0"].sort());
+    expect(r.skipped).toEqual([{ what: "固定を引き継げなかったもの: ロビー / Lithium 0.1", detail: "Modrinth に同じファイルの版が見つかりません" }]);
+    expect(asked).toEqual(["https://api.modrinth.com/v2/version_files"]); // まとめて 1 回
+    const rows = await t.db.select({ item: libraryItem.title, versionId: addonSetItem.versionId, versionNumber: addonSetItem.versionNumber }).from(addonSetItem)
+      .innerJoin(libraryItem, eq(libraryItem.id, addonSetItem.itemId));
+    const of = (n: string) => rows.find((x) => x.item === n)!;
+    expect(of("LuckPerms")).toEqual({ item: "LuckPerms", versionId: "LP053xxx", versionNumber: "5.3" });
+    expect(of("自作").versionNumber).toBe("1.0");
+    expect(of("Lithium").versionId).toBeNull();
+    expect(await maybeImportV02Pins(t.db, { v02Dir, v03Dir, secret: TEST_SECRET, fetch: fake })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 のユーザーごとの権限の取り込み", () => {
+  it("v02 の権限を対応表のとおりに v03 のメンバーごとの権限に足す。対応の無いもの・違うものは理由を残す。一度だけ", async () => {
+    const r = (await maybeImportV02Perms(t.db, { v02Dir, v03Dir }))!;
+    expect(r.users).toEqual([{ name: "編集者", grants: ["storage:manage"] }]);
+    expect(r.skipped).toEqual([{ what: "編集者 さんの権限「storage」", detail: "パネルのバックアップは、v03 では管理者以上だけです" }]);
+    const rows = await t.db.select({ name: schema.user.name, role: schema.member.role, allow: schema.memberPerm.allow }).from(schema.memberPerm)
+      .innerJoin(schema.member, eq(schema.member.id, schema.memberPerm.memberId)).innerJoin(schema.user, eq(schema.user.id, schema.member.userId));
+    expect(rows).toEqual([{ name: "編集者", role: "editor", allow: JSON.stringify(["storage:manage"]) }]);
+    expect(report!.notes.some((n) => n.includes("個別に付けていた権限"))).toBe(false); // 役割に置き換えず、ここで取り込む
+    expect(await maybeImportV02Perms(t.db, { v02Dir, v03Dir })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
+  });
+});
+
+describe("v02 の配布元のファイルの取り込み", () => {
+  it("自動ダウンロード → チームの「保存する」、残す数 → アイテムの残す数、配布元のわかるアイテムのファイル → 保存した版(v02 のファイルを指す)。一度だけ", async () => {
+    const fake = async (url: string, init?: RequestInit) => {
+      if (url === "https://api.modrinth.com/v2/version_files") {
+        const { hashes } = JSON.parse(String(init?.body));
+        return Response.json(Object.fromEntries(hashes.filter((h: string) => h === "a".repeat(40)).map((h: string) => [h, { id: "LP053xxx", project_id: "Vebnzrzj", version_number: "5.3" }])));
+      }
+      return Response.json({}, { status: 404 });
+    };
+    const r = (await maybeImportV02Saved(t.db, { v02Dir, v03Dir, secret: TEST_SECRET, fetch: fake }))!;
+    expect(r).toMatchObject({ keepFiles: true, keepVersions: ["自作(3 個)"], files: 3 });
+    const [opt] = await t.db.select().from(schema.teamOption);
+    expect(opt.keepFiles).toBe(true);
+    const files = await t.db.select({ title: libraryItem.title, key: schema.libraryFile.storageKey, up: schema.libraryFile.upstreamVersionId }).from(schema.libraryFile)
+      .innerJoin(libraryItem, eq(libraryItem.id, schema.libraryFile.itemId)).where(eq(libraryItem.source, "modrinth"));
+    expect(files.map((f) => [f.title, f.key, f.up]).sort()).toEqual([
+      ["Lithium", "library/mod/Lithium/lithium-0.1.jar", "v02:6"],
+      ["LuckPerms", "library/plugin/LuckPerms/LuckPerms-5.3.jar", "LP053xxx"],
+      ["LuckPerms", "library/plugin/LuckPerms/LuckPerms-5.4.jar", "v02:1"],
+    ]);
+    expect(await maybeImportV02Saved(t.db, { v02Dir, v03Dir, secret: TEST_SECRET, fetch: fake })).toBeNull();
+    expect(fileHash(join(v02Dir, "index.db"))).toBe(v02Hash);
   });
 });

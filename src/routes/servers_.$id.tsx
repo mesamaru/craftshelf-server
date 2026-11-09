@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 import { Link, createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { identifyMods, serverChanges, undoChange, installMod, installedMods, modUpdates, removeMod, rollbackMod, searchMods, serverDetail, setModHold, setProfile } from "~/lib/library-api";
+import { identifyMods, serverChanges, undoChange, installMod, installedMods, modUpdates, removeMod, rollbackMod, searchMods, serverDetail, serverMissingDeps, setModEnabled, setModHold, setProfile } from "~/lib/library-api";
 import { importServerFile } from "~/lib/uploads-api";
 import { ApplyResults } from "~/lib/apply-results";
-import { PLATFORMS, PLATFORM_IDS } from "~/lib/platforms";
-import { localSettings, setLocalSettings } from "~/lib/servers-api";
-import { bindServerSet, listSets, syncServerSet } from "~/lib/sets-api";
+import { ITEM_TYPES, PLATFORMS, PLATFORM_IDS, kindsOf } from "~/lib/platforms";
+import { ItemIcon } from "~/lib/type-icon";
+import { listServers, localSettings, serverStatus, setLocalSettings } from "~/lib/servers-api";
+import { bindServerSet, copyServer, listSets, setAutoUpdate, syncServerSet } from "~/lib/sets-api";
 import { SOURCE_LABEL, type Source, pageUrl } from "~/lib/sources";
 import { useCan } from "~/lib/use-can";
-import { rollbackSoftware, softwareInfo, updateSoftware } from "~/lib/software-api";
+import { detectSoftware, installSoftware, rollbackSoftware, setSoftware, softwareBuilds, softwareInfo, updateSoftware } from "~/lib/software-api";
+import { SOFTWARE, SOFTWARE_IDS } from "~/lib/software";
+import { createWorldBackup, removeWorldBackup, restoreWorldBackup, setWorldBackup, worldBackups } from "~/lib/worlds-api";
+import { getServerSchedule, setServerSchedule } from "~/lib/schedule-api";
 
 export const Route = createFileRoute("/servers_/$id")({
   beforeLoad: ({ context, params }) => {
@@ -32,11 +36,12 @@ function ServerPage() {
   const { can } = useCan(user.id);
   const list = useServerFn(installedMods);
   const [items, setItems] = useState<Installed[] | null>(null);
+  const [datapacks, setDatapacks] = useState<string | null>(null); // ワールドのデータパックのフォルダ
   const [error, setError] = useState("");
 
   const reload = () => {
     if (!server.profile) return;
-    list({ data: { id: server.id } }).then((r) => { setItems(r.items); setError(""); }, (e) => setError(message(e)));
+    list({ data: { id: server.id } }).then((r) => { setItems(r.items); setDatapacks(r.datapacks); setError(""); }, (e) => setError(message(e)));
   };
   useEffect(reload, [server.id, server.profile?.platform, server.profile?.mcVersion]);
 
@@ -49,17 +54,22 @@ function ServerPage() {
         <Link to="/servers/$id/files" params={{ id: server.id }} className="capsule">ファイルとコマンド</Link>
       </header>
 
+      <Live id={server.id} />
       <Profile id={server.id} profile={server.profile} editable={can({ server: ["update"] })} />
       {server.kind === "local" && can({ server: ["update"] }) && <LocalControl id={server.id} />}
+      {can({ server: ["control"] }) && <Worlds id={server.id} admin={can({ server: ["update"] })} />}
 
+      <Software id={server.id} admin={can({ server: ["update"] })} />
       {server.profile && (
         <>
-          <Software id={server.id} admin={can({ server: ["update"] })} />
           <SetBinding id={server.id} name={server.name} edit={edit} onSynced={reload} />
-          <Installed id={server.id} items={items} error={error} edit={edit} local={app.mode === "self"}
-            dir={PLATFORMS[server.profile.platform].dir} onChange={reload} />
+          {edit && <CopyServers id={server.id} name={server.name} onDone={reload} />}
+          <ServerSchedule id={server.id} admin={can({ server: ["update"] })} />
+          <Installed id={server.id} items={items} error={error} edit={edit} local={app.mode === "self"} auto={server.autoUpdate}
+            dir={[PLATFORMS[server.profile.platform].dir, datapacks].filter(Boolean).map((d) => `${d}/`).join("・")} onChange={reload} />
           <Changes id={server.id} edit={edit} items={items} onChange={reload} />
-          {edit && <Search id={server.id} installed={items ?? []}
+          {edit && <Search id={server.id} installed={items ?? []} datapacks={kindsOf(server.profile.platform).includes("datapack")}
+            type={PLATFORMS[server.profile.platform].type}
             sources={(server.sources as Source[]).filter((s) => s !== "spigot" || PLATFORMS[server.profile!.platform].type === "plugin")} onInstalled={reload} />}
         </>
       )}
@@ -74,7 +84,20 @@ function Profile({ id, profile, editable }:
   const [platform, setPlatform] = useState(profile?.platform ?? "");
   const [mcVersion, setMcVersion] = useState(profile?.mcVersion ?? "");
   const [error, setError] = useState("");
+  const [found, setFound] = useState("");
+  const detect = useServerFn(detectSoftware);
   const changed = platform !== (profile?.platform ?? "") || mcVersion !== (profile?.mcVersion ?? "");
+  const guess = async () => {
+    setError("");
+    try {
+      const d = await detect({ data: { id } });
+      if (d.platform) setPlatform(d.platform);
+      if (d.mcVersion) setMcVersion(d.mcVersion);
+      setFound(d.software ? `${SOFTWARE[d.software].label}${d.mcVersion ? ` ${d.mcVersion}` : ""} のようです${d.platform ? "(よければ保存してください)" : "(Mod・プラグインは扱えない種類です)"}` : "ファイルからは分かりませんでした");
+    } catch (e) {
+      setError(message(e));
+    }
+  };
 
   const submit = async () => {
     try {
@@ -108,15 +131,20 @@ function Profile({ id, profile, editable }:
         <span>Minecraft のバージョン</span>
         <input className="trail version" placeholder="例 1.21.1" value={mcVersion} onChange={(e) => setMcVersion(e.target.value)} aria-label="Minecraft のバージョン" />
       </div>
+      <button className="row link" type="button" onClick={guess}>サーバーのファイルから判定する</button>
+      {found && <p className="row muted" role="status">{found}</p>}
       {error && <p className="row error" role="alert">{error}</p>}
       {changed && <button className="capsule primary" type="button" onClick={submit} disabled={!platform}>保存</button>}
     </section>
   );
 }
 
-function Installed({ id, items, error, edit, local, dir, onChange }:
-  { id: string; items: Installed[] | null; error: string; edit: boolean; local: boolean; dir: string; onChange: () => void }) {
+function Installed({ id, items, error, edit, local, auto, dir, onChange }:
+  { id: string; items: Installed[] | null; error: string; edit: boolean; local: boolean; auto: boolean; dir: string; onChange: () => void }) {
+  const router = useRouter();
   const identify = useServerFn(identifyMods);
+  const toggle = useServerFn(setModEnabled);
+  const setAuto = useServerFn(setAutoUpdate);
   const importFile = useServerFn(importServerFile);
   const [found, setFound] = useState("");
   const check = useServerFn(modUpdates);
@@ -124,7 +152,12 @@ function Installed({ id, items, error, edit, local, dir, onChange }:
   const remove = useServerFn(removeMod);
   const hold = useServerFn(setModHold);
   const rollback = useServerFn(rollbackMod);
+  const missingDeps = useServerFn(serverMissingDeps);
   const [updates, setUpdates] = useState<Map<string, Update> | null>(null);
+  // 入っているものの必須の前提で、このサーバーに無いもの(開いたとき・前提を入れたあとに確かめる)
+  const [deps, setDeps] = useState<Awaited<ReturnType<typeof serverMissingDeps>> | null>(null);
+  const checkDeps = () => { missingDeps({ data: { id } }).then(setDeps, () => setDeps(null)); };
+  useEffect(checkDeps, [id]);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
 
@@ -147,16 +180,49 @@ function Installed({ id, items, error, edit, local, dir, onChange }:
 
   return (
     <>
-      <div className="group-title">入っているもの({dir}/)</div>
+      <div className="group-title">{`入っているもの(${dir})`}</div>
       <section className="group">
         {!items && !error && <div className="row muted">サーバーに問い合わせています…</div>}
         {items?.length === 0 && <div className="row muted">まだ何も入っていません。</div>}
+        {deps?.missing.map((d) => (
+          <div className="row" key={`dep:${d.source}:${d.projectId}`}>
+            <span className="main">
+              <span className="error">前提が入っていません: <span translate="no">{d.title}</span></span>
+              <span className="muted small"><span translate="no">{d.by.join("、")}</span> が使います</span>
+            </span>
+            {edit && (
+              <button className="trail link" type="button" disabled={!!busy}
+                onClick={() => run(`dep:${d.projectId}`, async () => { await install({ data: { id, projectId: d.projectId, source: d.source } }); checkDeps(); })}>
+                {busy === `dep:${d.projectId}` ? "入れています…" : "入れる"}
+              </button>
+            )}
+          </div>
+        ))}
         {items?.map((m) => {
-          const u = updates?.get(m.filename);
+          const u = m.disabled ? undefined : updates?.get(m.filename);
+          // 押せるもの(はじめのものを右に寄せる)
+          const acts: { key: string; label: string; danger?: boolean; fn: () => void }[] = !edit ? [] : [
+            ...(u ? [{ key: m.filename, label: busy === m.filename ? "更新中…" : "更新",
+              fn: () => run(m.filename, async () => { await install({ data: { id, projectId: u.projectId, source: u.source } }); setUpdates((p) => { const n = new Map(p); n.delete(m.filename); return n; }); }) }] : []),
+            ...(m.canRollback && m.projectId && m.source && !m.disabled ? [{ key: `rb:${m.filename}`, label: busy === `rb:${m.filename}` ? "戻しています…" : "前の版に戻す",
+              fn: () => confirm(`${m.title} を前の版に戻しますか?(戻したあとは「更新を止める」になります)`) && run(`rb:${m.filename}`, () => rollback({ data: { id, projectId: m.projectId!, source: m.source as Source } })) }] : []),
+            ...(m.projectId && m.source ? [{ key: `hold:${m.filename}`, label: m.held ? "止めるのをやめる" : "更新を止める",
+              fn: () => run(`hold:${m.filename}`, () => hold({ data: { id, projectId: m.projectId!, source: m.source as Source, hold: !m.held } })) }] : []),
+            ...(local && !m.projectId ? [{ key: `imp:${m.filename}`, label: busy === `imp:${m.filename}` ? "取り込んでいます…" : "ライブラリに取り込む",
+              fn: () => run(`imp:${m.filename}`, () => importFile({ data: { id, filename: m.filename } })) }] : []),
+            { key: `tg:${m.filename}`, label: m.disabled ? "有効にする" : "無効にする",
+              fn: () => run(`tg:${m.filename}`, () => toggle({ data: { id, filename: m.filename, enable: m.disabled } })) },
+            { key: `rm:${m.filename}`, label: "外す", danger: true,
+              fn: () => confirm(`${m.title ?? m.filename} を外しますか?(「変更の履歴」から元に戻せます)`) && run(m.filename, () => remove({ data: { id, filename: m.filename } })) },
+          ];
           return (
             <div className="row" key={m.filename}>
               <span className="main">
-                <span translate="no">{m.title ?? m.filename}</span>
+                <span>
+                  <span translate="no">{m.title ?? m.filename}</span>
+                  {m.datapack && <span className="badge muted-badge">データパック</span>}
+                  {m.disabled && <span className="badge muted-badge">無効</span>}
+                </span>
                 {m.title && (
                   <span className="muted" translate="no">
                     {m.versionNumber} · {m.filename}
@@ -164,37 +230,11 @@ function Installed({ id, items, error, edit, local, dir, onChange }:
                     {m.held && <span className="badge muted-badge">更新を止めています</span>}
                   </span>
                 )}
+                {m.pinned && <span className="muted small">結び付けたセットで版を固定しています</span>}
               </span>
-              {edit && u && (
-                <button className="trail link" type="button" disabled={!!busy}
-                  onClick={() => run(m.filename, async () => { await install({ data: { id, projectId: u.projectId, source: u.source } }); setUpdates((p) => { const n = new Map(p); n.delete(m.filename); return n; }); })}>
-                  {busy === m.filename ? "更新中…" : "更新"}
-                </button>
-              )}
-              {edit && m.canRollback && m.projectId && m.source && (
-                <button className={`${u ? "" : "trail "}link`} type="button" disabled={!!busy}
-                  onClick={() => confirm(`${m.title} を前の版に戻しますか?(戻したあとは「更新を止める」になります)`) && run(`rb:${m.filename}`, () => rollback({ data: { id, projectId: m.projectId!, source: m.source as Source } }))}>
-                  {busy === `rb:${m.filename}` ? "戻しています…" : "前の版に戻す"}
-                </button>
-              )}
-              {edit && m.projectId && m.source && (
-                <button className={`${u || m.canRollback ? "" : "trail "}link`} type="button" disabled={!!busy}
-                  onClick={() => run(`hold:${m.filename}`, () => hold({ data: { id, projectId: m.projectId!, source: m.source as Source, hold: !m.held } }))}>
-                  {m.held ? "止めるのをやめる" : "更新を止める"}
-                </button>
-              )}
-              {edit && local && !m.projectId && (
-                <button className="trail link" type="button" disabled={!!busy}
-                  onClick={() => run(`imp:${m.filename}`, () => importFile({ data: { id, filename: m.filename } }))}>
-                  {busy === `imp:${m.filename}` ? "取り込んでいます…" : "ライブラリに取り込む"}
-                </button>
-              )}
-              {edit && (
-                <button className={`${u || m.projectId || local ? "" : "trail "}link danger`} type="button" disabled={!!busy}
-                  onClick={() => confirm(`${m.title ?? m.filename} を外しますか?(「変更の履歴」から元に戻せます)`) && run(m.filename, () => remove({ data: { id, filename: m.filename } }))}>
-                  外す
-                </button>
-              )}
+              {acts.map((a, i) => (
+                <button key={a.key} className={`${i === 0 ? "trail " : ""}link${a.danger ? " danger" : ""}`} type="button" disabled={!!busy} onClick={a.fn}>{a.label}</button>
+              ))}
             </div>
           );
         })}
@@ -212,17 +252,28 @@ function Installed({ id, items, error, edit, local, dir, onChange }:
             {busy === "check" ? "確かめています…" : updates ? `更新を確かめる(${updates.size} 件あり)` : "更新を確かめる"}
           </button>
         )}
+        {items && (edit ? (
+          <label className="row">
+            <span>自動更新(6 時間ごとに、新しい版があれば入れる)</span>
+            <input className="trail" type="checkbox" checked={auto} disabled={!!busy}
+              onChange={(e) => { const on = e.target.checked; run("auto", async () => { await setAuto({ data: { serverId: id, on } }); await router.invalidate(); }); }} />
+          </label>
+        ) : auto && <div className="row"><span>自動更新</span><span className="trail">オン</span></div>)}
         {(error || err) && <p className="row error" role="alert">{error || err}</p>}
       </section>
+      <p className="foot">「無効にする」と、ファイルを消さずに名前の最後に .disabled を付けて止めます(更新・自動更新の対象からも外れます)。自動更新は、ライブラリ(配布元・アップロード)に新しい版が出たら入れます。「更新を止める」にしたもの・無効にしたものは入れ替えません。</p>
       <p className="foot">Modrinth・SpigotMC から入れたものは、版と更新がわかります。それ以外のファイルは名前だけを表示します(「配布元を探す」で、ファイルの中身から Modrinth・CurseForge のものかを確かめられます)。「更新を止める」にしたものは、セットでそろえる・予約・更新の確認で新しい版にしません。変更はサーバーの再起動で反映されます。</p>
     </>
   );
 }
 
-function Search({ id, installed, sources, onInstalled }: { id: string; installed: Installed[]; sources: Source[]; onInstalled: () => void }) {
+function Search({ id, installed, sources, datapacks, type, onInstalled }:
+  { id: string; installed: Installed[]; sources: Source[]; datapacks: boolean; type: "plugin" | "mod"; onInstalled: () => void }) {
   const search = useServerFn(searchMods);
   const install = useServerFn(installMod);
   const [source, setSource] = useState<Source>("modrinth");
+  const [kind, setKind] = useState<"" | "datapack">(""); // datapack なら、ワールドのデータパックを探して入れる
+  const shown = kind ? sources.filter((s) => s !== "spigot") : sources;
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Awaited<ReturnType<typeof searchMods>> | null>(null);
   const [busy, setBusy] = useState("");
@@ -232,10 +283,10 @@ function Search({ id, installed, sources, onInstalled }: { id: string; installed
   const key = (src: string, projectId: string) => `${src}:${projectId}`;
   const have = new Set(installed.filter((m) => m.projectId).map((m) => key(m.source ?? "", m.projectId!)));
 
-  const find = async (src = source) => {
+  const find = async (src = source, k = kind) => {
     setError("");
     try {
-      setHits(await search({ data: { id, query, source: src } }));
+      setHits(await search({ data: { id, query, source: src, kind: k || undefined } }));
     } catch (e) {
       setError(message(e));
     }
@@ -246,7 +297,7 @@ function Search({ id, installed, sources, onInstalled }: { id: string; installed
     setBusy(projectId);
     setError("");
     try {
-      const r = await install({ data: { id, projectId, source } });
+      const r = await install({ data: { id, projectId, source, kind: kind || undefined } });
       setDone((d) => new Set(d).add(key(source, projectId)));
       if (r.deps.length) setNote(`前提も入れました: ${r.deps.map((d) => (d.ok ? `${d.title} ${d.detail}` : `${d.title}(入れられません: ${d.detail})`)).join("、")}`);
       onInstalled();
@@ -261,12 +312,22 @@ function Search({ id, installed, sources, onInstalled }: { id: string; installed
     <>
       <div className="group-title">{`${SOURCE_LABEL[source]} から探す`}</div>
       <form className="group form" onSubmit={(e) => (e.preventDefault(), find())}>
-        {sources.length > 1 && (
+        {datapacks && (
+          <div className="row">
+            <span>種類</span>
+            <select className="trail" value={kind} aria-label="種類"
+              onChange={(e) => { const k = e.target.value as "" | "datapack"; const s = k && source === "spigot" ? "modrinth" : source; setKind(k); setSource(s); setHits(null); find(s, k); }}>
+              <option value="">{ITEM_TYPES[type]}</option>
+              <option value="datapack">{ITEM_TYPES.datapack}</option>
+            </select>
+          </div>
+        )}
+        {shown.length > 1 && (
           <div className="row">
             <span>配布元</span>
             <select className="trail" value={source} aria-label="配布元"
               onChange={(e) => { const s = e.target.value as Source; setSource(s); setHits(null); find(s); }}>
-              {sources.map((s) => <option key={s} value={s}>{SOURCE_LABEL[s]}</option>)}
+              {shown.map((s) => <option key={s} value={s}>{SOURCE_LABEL[s]}</option>)}
             </select>
           </div>
         )}
@@ -274,7 +335,7 @@ function Search({ id, installed, sources, onInstalled }: { id: string; installed
         {hits?.length === 0 && <p className="row muted">見つかりませんでした。</p>}
         {hits?.map((h) => (
           <div className="row hit" key={h.projectId}>
-            {h.iconUrl ? <img src={h.iconUrl} alt="" width={40} height={40} loading="lazy" /> : <span className="icon-ph" />}
+            <ItemIcon type={kind || type} url={h.iconUrl} />
             <span className="main">
               <a href={pageUrl(source, h.projectId, h.slug)} target="_blank" rel="noreferrer noopener" translate="no">{h.title}</a>
               <span className="muted summary" translate="no">{h.summary}</span>
@@ -296,19 +357,29 @@ function Search({ id, installed, sources, onInstalled }: { id: string; installed
   );
 }
 
-// このサーバーに結び付けたセット。「セットでそろえる」で、足りないものを入れ、新しい版があれば更新する
+// このサーバーに結び付けたセットと、そろえる。そろえる元は結び付けたセットか、ほかのサーバー。
+// そろえ方は 3 通り(入っているものだけ合わせる・足りないものも入れる・まったく同じにする)
+type CopyMode = "update" | "add" | "mirror";
+const COPY_LABEL: Record<CopyMode, string> = { update: "入っているものだけ合わせる", add: "足りないものも入れる", mirror: "まったく同じにする" };
+
 function SetBinding({ id, name, edit, onSynced }: { id: string; name: string; edit: boolean; onSynced: () => void }) {
   const load = useServerFn(listSets);
+  const loadServers = useServerFn(listServers);
   const bind = useServerFn(bindServerSet);
   const sync = useServerFn(syncServerSet);
+  const copy = useServerFn(copyServer);
   const [sets, setSets] = useState<Awaited<ReturnType<typeof listSets>> | null>(null);
+  const [others, setOthers] = useState<{ id: string; name: string }[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [results, setResults] = useState<Awaited<ReturnType<typeof syncServerSet>> | null>(null);
-  const [removeExtra, setRemoveExtra] = useState(false);
+  const [results, setResults] = useState<{ server: string; list: Awaited<ReturnType<typeof syncServerSet>> } | null>(null);
+  const [mode, setMode] = useState<CopyMode>("add");
+  const [from, setFrom] = useState("set");
   const reload = () => { load().then(setSets, (e) => setError(message(e))); };
   useEffect(reload, [id]);
+  useEffect(() => { if (edit) loadServers().then((l) => setOthers(l.filter((x) => x.id !== id)), () => setOthers([])); }, [id, edit]);
   const current = sets?.find((x) => x.servers.some((v) => v.id === id)) ?? null;
+  const source = from === "set" ? (current ? "set" : others[0]?.id ?? "") : from;
 
   const run = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -321,11 +392,26 @@ function SetBinding({ id, name, edit, onSynced }: { id: string; name: string; ed
       setBusy("");
     }
   };
+  const doSync = () => {
+    const what = source === "set" ? `セット「${current?.name}」` : `「${others.find((o) => o.id === source)?.name}」`;
+    if (!confirm(mode === "mirror"
+      ? `「${name}」を${what}にそろえ、そろえる元に無いもの(このアプリで入れたもの)を外します。よろしいですか?`
+      : `「${name}」を${what}にそろえますか?(${COPY_LABEL[mode]})`)) return;
+    run("sync", async () => {
+      if (source === "set") setResults({ server: name, list: await sync({ data: { serverId: id, mode } }) });
+      else {
+        const [r] = await copy({ data: { from: source, to: [id], mode } });
+        if (r?.error) throw new Error(r.error);
+        setResults({ server: name, list: r?.results ?? [] });
+      }
+      onSynced();
+    });
+  };
 
   if (!sets || (!edit && !current)) return null;
   return (
     <>
-      <div className="group-title">セット</div>
+      <div className="group-title">セット・ほかのサーバーにそろえる</div>
       <section className="group">
         <div className="row">
           <span>結び付けるセット</span>
@@ -337,24 +423,163 @@ function SetBinding({ id, name, edit, onSynced }: { id: string; name: string; ed
             </select>
           ) : <span className="trail" translate="no">{current?.name}</span>}
         </div>
-        {edit && current && (
-          <button className="row link" type="button" disabled={!!busy}
-            onClick={() => (!removeExtra || confirm("セットに無いもの(このアプリで入れたもの)をサーバーから外します。よろしいですか?"))
-              && run("sync", async () => { setResults(await sync({ data: { serverId: id, removeExtra } })); onSynced(); })}>
-            {busy === "sync" ? "そろえています…" : "セットでそろえる"}
-          </button>
-        )}
-        {edit && current && (
-          <label className="row">
-            <span>セットに無いものを外す(このアプリで入れたものだけ)</span>
-            <input className="trail" type="checkbox" checked={removeExtra} onChange={(e) => setRemoveExtra(e.target.checked)} />
-          </label>
+        {edit && (current || others.length > 0) && (
+          <>
+            <div className="row">
+              <span>そろえる元</span>
+              <select className="trail" value={source} disabled={!!busy} aria-label="そろえる元" onChange={(e) => setFrom(e.target.value)}>
+                {current && <option value="set">{`結び付けたセット(${current.name})`}</option>}
+                {others.map((o) => <option key={o.id} value={o.id} translate="no">{o.name}</option>)}
+              </select>
+            </div>
+            <div className="row">
+              <span>そろえ方</span>
+              <select className="trail" value={mode} disabled={!!busy} aria-label="そろえ方" onChange={(e) => setMode(e.target.value as CopyMode)}>
+                {(Object.keys(COPY_LABEL) as CopyMode[]).map((k) => <option key={k} value={k}>{COPY_LABEL[k]}</option>)}
+              </select>
+            </div>
+            <button className="row link" type="button" disabled={!!busy || !source} onClick={doSync}>
+              {busy === "sync" ? "そろえています…" : "そろえる"}
+            </button>
+          </>
         )}
         {edit && sets.length === 0 && <div className="row muted">まだセットがありません。トップの「セット」で作れます。</div>}
-        {results && <ApplyResults server={name} verb="そろえた" list={results} />}
+        {results && <ApplyResults server={results.server} verb="そろえた" list={results.list} empty="変えるものはありませんでした。" />}
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
-      <p className="foot">「セットでそろえる」は、セットのうちこのサーバーの種類に合うもので、足りないものを入れ、入っているものに新しい版があれば更新します。セットに無いものは外しません。</p>
+      <p className="foot">「入っているものだけ合わせる」は、入っているものだけを新しい版(ほかのサーバーなら同じ版)にします。「足りないものも入れる」は、無いものも入れます。「まったく同じにする」は、さらにそろえる元に無いもの(このアプリで入れたもの)を外します。セットは、このサーバーの種類に合うものだけを入れます。「更新を止める」にしたもの・無効にしたものは変えません。外したもの・入れ替えたものは「変更の履歴」から元に戻せます。</p>
+    </>
+  );
+}
+
+// 検証用から本番へ反映: このサーバーの構成を、選んだほかのサーバーへそろえる
+function CopyServers({ id, name, onDone }: { id: string; name: string; onDone: () => void }) {
+  const load = useServerFn(listServers);
+  const copy = useServerFn(copyServer);
+  const [others, setOthers] = useState<{ id: string; name: string }[] | null>(null);
+  const [mode, setMode] = useState<CopyMode>("add");
+  const [to, setTo] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState<Awaited<ReturnType<typeof copyServer>> | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { load().then((l) => setOthers(l.filter((s) => s.id !== id)), (e) => setError(message(e))); }, [id]);
+  if (!others?.length) return null;
+
+  const run = async () => {
+    if (!confirm(`「${name}」の構成を、選んだ ${to.size} 台へ反映しますか?`)) return;
+    setBusy(true);
+    setError("");
+    setResults(null);
+    try {
+      setResults(await copy({ data: { from: id, to: [...to], mode } }));
+      onDone();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div className="group-title">検証用から本番へ反映</div>
+      <section className="group form">
+        <div className="row">
+          <span>そろえ方</span>
+          <select className="trail" value={mode} aria-label="反映するときのそろえ方" onChange={(e) => setMode(e.target.value as CopyMode)}>
+            {(Object.keys(COPY_LABEL) as CopyMode[]).map((k) => <option key={k} value={k}>{COPY_LABEL[k]}</option>)}
+          </select>
+        </div>
+        {others.map((o) => (
+          <label className="row" key={o.id}>
+            <span translate="no">{o.name}</span>
+            <input className="trail" type="checkbox" checked={to.has(o.id)}
+              onChange={(e) => setTo((x) => { const n = new Set(x); if (e.target.checked) n.add(o.id); else n.delete(o.id); return n; })} />
+          </label>
+        ))}
+        <button className="row link" type="button" disabled={!to.size || busy} onClick={run}>
+          {busy ? "反映しています…" : `選んだ ${to.size} 台へ反映`}
+        </button>
+        {results?.map((r) => (r.error
+          ? <p className="row error" key={r.serverId}><span translate="no">{r.server}</span>: {r.error}</p>
+          : <ApplyResults key={r.serverId} server={r.server} verb="そろえた" list={r.results} empty="変えるものはありませんでした。" />))}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">このサーバーに、このアプリで入れたもの(無効にしたものは除く)と同じ版を、選んだサーバーに入れます。そろえ方は上の「そろえる」と同じです。</p>
+    </>
+  );
+}
+
+// サーバーごとの予約(v02 の予約同期): 毎日・毎週の時刻に、入っているものを最新にする・結び付けたセットでそろえる。変えたら再起動もできる
+function ServerSchedule({ id, admin }: { id: string; admin: boolean }) {
+  const load = useServerFn(getServerSchedule);
+  const save = useServerFn(setServerSchedule);
+  const [d, setD] = useState<Awaited<ReturnType<typeof getServerSchedule>> | null>(null);
+  const [draft, setDraft] = useState<Awaited<ReturnType<typeof getServerSchedule>> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const reload = () => load({ data: { id } }).then((x) => { setD(x); setDraft(x); }, (e) => setError(message(e)));
+  useEffect(() => { reload(); }, [id]);
+  if (!d || !draft) return error ? <p className="row error" role="alert">{error}</p> : null;
+  if (!admin && d.mode === "off") return null;
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    setNote("");
+    try {
+      await save({ data: { id, mode: draft.mode, action: draft.action, time: draft.time, dow: draft.dow, restart: draft.restart, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+      setNote("保存しました");
+      await reload();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div className="group-title">このサーバーの予約</div>
+      <section className="group form">
+        <div className="row">
+          <span>予約</span>
+          <select className="trail" value={draft.mode} disabled={!admin} aria-label="このサーバーの予約" onChange={(e) => setDraft({ ...draft, mode: e.target.value })}>
+            <option value="off">しない</option>
+            <option value="daily">毎日</option>
+            <option value="weekly">毎週</option>
+          </select>
+        </div>
+        {draft.mode === "weekly" && (
+          <div className="row">
+            <span>曜日</span>
+            <select className="trail" value={draft.dow} disabled={!admin} aria-label="予約の曜日" onChange={(e) => setDraft({ ...draft, dow: Number(e.target.value) })}>
+              {DAY_NAMES.map((n, i) => <option key={i} value={i}>{`${n}曜日`}</option>)}
+            </select>
+          </div>
+        )}
+        {draft.mode !== "off" && (
+          <>
+            <div className="row">
+              <span>時刻</span>
+              <input className="trail" type="time" value={draft.time} disabled={!admin} aria-label="予約の時刻" onChange={(e) => setDraft({ ...draft, time: e.target.value })} />
+            </div>
+            <div className="row">
+              <span>すること</span>
+              <select className="trail" value={draft.action} disabled={!admin} aria-label="予約ですること" onChange={(e) => setDraft({ ...draft, action: e.target.value })}>
+                {Object.entries(d.actions).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </select>
+            </div>
+            <label className="row">
+              <span>変えたら再起動する</span>
+              <input className="trail" type="checkbox" checked={draft.restart} disabled={!admin} onChange={(e) => setDraft({ ...draft, restart: e.target.checked })} />
+            </label>
+          </>
+        )}
+        {d.lastRunAt && <div className="row muted">{`前に動いたとき: ${new Date(d.lastRunAt).toLocaleString("ja-JP")}`}</div>}
+        {admin && <button className="row link" type="button" disabled={busy} onClick={submit}>{busy ? "保存しています…" : "保存"}</button>}
+        {note && <p className="row muted" role="status">{note}</p>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      <p className="foot">決めた時刻に、このサーバーの Mod・プラグインを新しい版にする(「更新を止める」にしたもの・無効にしたものは除く)か、結び付けたセットでそろえます。何か変えて「変えたら再起動する」を選んでいれば、サーバーを再起動します。セットの画面の予約(チームで 1 つ)とは別に動きます。時刻は保存したときのブラウザの時間帯です。決められるのは管理者以上です。</p>
     </>
   );
 }
@@ -424,21 +649,29 @@ function LocalControl({ id }: { id: string }) {
   );
 }
 
-// サーバー本体(jar): 今のビルドといちばん新しいビルド。入れ替える・入れ替える前に戻すのは管理者以上
+// a が b より古いバージョンか(1.21.10 は 1.21.4 より新しい)
+const older = (a: string, b: string) => { const x = a.split(".").map(Number), y = b.split(".").map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false; };
+
+// サーバー本体(jar): 今のビルドといちばん新しいビルド。入れ替える(ビルド・Minecraft のバージョンを選べる)・残した jar に戻すのは管理者以上
 function Software({ id, admin }: { id: string; admin: boolean }) {
   const load = useServerFn(softwareInfo);
   const update = useServerFn(updateSoftware);
+  const install = useServerFn(installSoftware);
+  const listBuilds = useServerFn(softwareBuilds);
   const back = useServerFn(rollbackSoftware);
+  const choose = useServerFn(setSoftware);
+  const backupWorld = useServerFn(createWorldBackup);
   const [info, setInfo] = useState<Awaited<ReturnType<typeof softwareInfo>> | null>(null);
+  const [builds, setBuilds] = useState<Awaited<ReturnType<typeof softwareBuilds>> | null>(null);
+  const [pick, setPick] = useState({ mc: "", build: "" });
   const [restart, setRestart] = useState(false);
-  const [mc, setMc] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const reload = () => load({ data: { id } }).then((d) => { setInfo(d); setError(""); }, (e) => setError(message(e)));
   useEffect(() => { reload(); }, [id]);
-  const run = async (ask: string, fn: () => Promise<string>) => {
-    if (!confirm(ask)) return;
+  const run = async (ask: string | null, fn: () => Promise<string>) => {
+    if (ask && !confirm(ask)) return;
     setBusy(true);
     setError("");
     setNote("");
@@ -451,11 +684,27 @@ function Software({ id, admin }: { id: string; admin: boolean }) {
       setBusy(false);
     }
   };
+  const after = (r: { restarted: boolean }) => (r.restarted ? "。再起動しています" : "。サーバーを再起動すると新しい jar で動きます");
+  const openBuilds = (mc?: string) => listBuilds({ data: { id, mc } }).then((b) => { setBuilds(b); setPick({ mc: b.mc, build: "" }); }, (e) => setError(message(e)));
+  const mcChanged = !!(info && pick.mc && info.mc && pick.mc !== info.mc && !info.proxy);
   return (
     <>
       <div className="group-title">サーバー本体</div>
       <section className="group">
         {!info && !error && <div className="row muted">確かめています…</div>}
+        {admin && (
+          <div className="row">
+            <span>サーバー本体の種類</span>
+            <select className="trail" value={info?.software ?? ""} disabled={busy} aria-label="サーバー本体の種類" onChange={(e) => run(null, async () => {
+              await choose({ data: { id, software: e.target.value } });
+              setBuilds(null);
+              return "サーバー本体の種類を変えました";
+            })}>
+              <option value="" disabled>選んでください</option>
+              {SOFTWARE_IDS.map((x) => <option key={x} value={x}>{SOFTWARE[x].label}</option>)}
+            </select>
+          </div>
+        )}
         {info && (
           <>
             <div className="row"><span>{info.label}</span><span className="trail muted" translate="no">{info.jar || "jar がわかりません"}</span></div>
@@ -465,42 +714,98 @@ function Software({ id, admin }: { id: string; admin: boolean }) {
               <span className="trail" translate="no">{info.latest ? info.latest.build : "確かめられません"}</span>
             </div>
             {info.update && <div className="row"><span className="notice small">新しいビルドがあります</span></div>}
-            {info.latest && !info.latest.auto && <a className="row link" href={info.page} target="_blank" rel="noopener noreferrer">配布ページで確かめる</a>}
+            <a className="row link" href={info.page} target="_blank" rel="noopener noreferrer">配布ページで確かめる</a>
+            {admin && info.auto && (
+              <label className="row"><span>入れ替えたら再起動する</span><input className="trail" type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} /></label>
+            )}
             {admin && info.update && info.latest?.auto && (
+              <button className="row link" type="button" disabled={busy || !info.jar} onClick={() => run(
+                `${info.jar} を ${info.latest!.build} に入れ替えますか?(今の jar は残し、あとで戻せます)`,
+                async () => { const r = await update({ data: { id, restart } }); return `${r.build} に入れ替えました${after(r)}`; },
+              )}>{busy ? "入れ替えています…" : "いちばん新しいビルドに入れ替える"}</button>
+            )}
+            {admin && info.auto && !builds && (
+              <button className="row link" type="button" disabled={busy || !info.jar} onClick={() => openBuilds()}>バージョンを選んで入れ替える…</button>
+            )}
+            {admin && builds && (
               <>
-                <label className="row"><span>入れ替えたら再起動する</span><input className="trail" type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} /></label>
-                <button className="row link" type="button" disabled={busy || !info.jar} onClick={() => run(
-                  `${info.jar} を ${info.latest!.build} に入れ替えますか?(今の jar は残し、あとで戻せます)`,
-                  async () => { const r = await update({ data: { id, restart } }); return `${r.build} に入れ替えました${r.restarted ? "。再起動しています" : "。サーバーを再起動すると新しい jar で動きます"}`; },
-                )}>{busy ? "入れ替えています…" : "いちばん新しいビルドに入れ替える"}</button>
+                {builds.mcVersions.length > 0 && (
+                  <div className="row">
+                    <span>{info.proxy ? "版" : "Minecraft のバージョン"}</span>
+                    <select className="trail" value={pick.mc} aria-label="入れる Minecraft のバージョン" onChange={(e) => openBuilds(e.target.value)}>
+                      {!builds.mcVersions.includes(pick.mc) && <option value={pick.mc} translate="no">{pick.mc || "選んでください…"}</option>}
+                      {builds.mcVersions.map((v) => <option key={v} value={v} translate="no">{v === info.mc ? `${v}(今)` : v}</option>)}
+                    </select>
+                  </div>
+                )}
+                <div className="row">
+                  <span>ビルド</span>
+                  <select className="trail" value={pick.build} aria-label="入れるビルド" onChange={(e) => setPick({ ...pick, build: e.target.value })}>
+                    <option value="">{builds.builds.length ? "選んでください…" : "見つかりません"}</option>
+                    {builds.builds.map((b) => <option key={b.build} value={b.build} disabled={!b.auto} translate="no">{`${b.build}${b.stable ? "" : "(試験版)"}${b.build === info.build && pick.mc === info.mc ? "(今)" : ""}`}</option>)}
+                  </select>
+                </div>
+                {mcChanged && (
+                  <>
+                  <div className="row">
+                    <span className="notice small">{`Minecraft のバージョンを ${info.mc} から ${pick.mc} に${older(pick.mc, info.mc) ? "下げると、ワールドが読めなくなったり壊れたりすることがあります" : "上げると、ワールドは新しいバージョンに変換され、元には戻せません"}。先にワールドをバックアップしてください。`}</span>
+                  </div>
+                    <button className="row link" type="button" disabled={busy} onClick={() => run(null, async () => { await backupWorld({ data: { id } }); return "ワールドのバックアップを始めました(終わると「ワールドのバックアップ」に出ます)"; })}>先にワールドをバックアップする</button>
+                  </>
+                )}
+                <button className="row link" type="button" disabled={busy || !pick.build} onClick={() => run(
+                  mcChanged
+                    ? `Minecraft を ${info.mc} から ${pick.mc}(ビルド ${pick.build})に変えますか?ワールドのバックアップを取ったか、プラグイン・Mod が ${pick.mc} に対応しているかを確かめてください。`
+                    : `${info.jar} を ${pick.build} に入れ替えますか?(今の jar は残し、あとで戻せます)`,
+                  async () => { const r = await install({ data: { id, mc: pick.mc || undefined, build: pick.build, restart } }); setBuilds(null); return `${r.mc ? `${r.mc} ` : ""}${r.build} に入れ替えました${after(r)}`; },
+                )}>{busy ? "入れ替えています…" : "選んだビルドに入れ替える"}</button>
+                <button className="row link" type="button" onClick={() => setBuilds(null)}>閉じる</button>
               </>
             )}
-            {admin && info.mcNewer.length > 0 && (
-              <div className="row">
-                <span>Minecraft のバージョンを上げる</span>
-                <select className="trail" value={mc} onChange={(e) => setMc(e.target.value)} aria-label="上げる Minecraft のバージョン">
-                  <option value="">選んでください…</option>
-                  {info.mcNewer.map((v) => <option key={v} value={v} translate="no">{v}</option>)}
-                </select>
-                <button className="trail link" type="button" disabled={busy || !mc || !info.jar} onClick={() => run(
-                  `Minecraft を ${info.mc} から ${mc} に上げますか?ワールドは新しいバージョンに変換され、元のバージョンには戻せません。先にワールドのバックアップを取り、プラグイン・Mod が ${mc} に対応しているかも確かめてください。`,
-                  async () => { const r = await update({ data: { id, restart, mc } }); setMc(""); return `${mc}(ビルド ${r.build})に入れ替えました${r.restarted ? "。再起動しています" : "。サーバーを再起動すると新しい jar で動きます"}`; },
-                )}>上げる</button>
+            {info.backups.length > 0 && <div className="row muted small">{`残している前の jar(新しい順・${info.backups.length} 個)`}</div>}
+            {info.backups.map((b) => (
+              <div className="row" key={b.file}>
+                <span className="main">
+                  <span translate="no">{`${b.mc ? `${b.mc} · ` : ""}${b.build || "ビルド不明"}`}</span>
+                  <span className="muted small" translate="no">{b.file}</span>
+                </span>
+                {admin && (
+                  <button className="trail link" type="button" disabled={busy} onClick={() => run(
+                    `${b.build || "前の jar"} に戻しますか?(今の jar は代わりに残します)`,
+                    async () => { const r = await back({ data: { id, file: b.file } }); return `${r.build || "前の jar"} に戻しました。サーバーを再起動すると戻した jar で動きます`; },
+                  )}>戻す</button>
+                )}
               </div>
-            )}
-            {admin && info.backup && (
-              <button className="row link" type="button" disabled={busy} onClick={() => run(
-                `入れ替える前の jar(${info.backup!.build || "ビルド不明"})に戻しますか?`,
-                async () => { const r = await back({ data: { id } }); return `${r.build || "前の jar"} に戻しました。サーバーを再起動すると戻した jar で動きます`; },
-              )}>{`入れ替える前の jar に戻す(${info.backup.build || "ビルド不明"})`}</button>
-            )}
+            ))}
           </>
         )}
         {note && <p className="row muted" role="status">{note}</p>}
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
-      <p className="foot">入れ替えるときは、サーバーが配布元から直接 jar を取り込みます。入れ替える前の jar は 1 つだけ残し、そこへ戻せます。Paper・Folia・Velocity・Purpur・Fabric は入れ替えられ、Forge などは新しい版があるかだけを確かめます。</p>
+      <p className="foot">入れ替えるときは、サーバーが配布元から直接 jar を取り込みます。入れ替える前の jar はサーバーのフォルダに 5 つまで残し、そこへ戻せます。Paper・Folia・Purpur・Leaf・Pufferfish・Velocity・Waterfall・BungeeCord・Fabric・Vanilla・Mohist・SpongeVanilla は入れ替えられ、Forge・NeoForge・Quilt・Arclight は新しい版があるかだけを確かめます。</p>
     </>
+  );
+}
+
+// 今の状態と、Minecraft のサーバーの人数・名前の一部・応答の速さ(Server List Ping)
+function Live({ id }: { id: string }) {
+  const status = useServerFn(serverStatus);
+  const [st, setSt] = useState<Awaited<ReturnType<typeof serverStatus>> | null>(null);
+  useEffect(() => {
+    const read = () => status({ data: { id } }).then(setSt, () => setSt(null));
+    read();
+    const t = setInterval(read, 15_000);
+    return () => clearInterval(t);
+  }, [id]);
+  if (!st?.ping) return null;
+  const p = st.ping;
+  return (
+    <section className="group">
+      <div className="row"><span>プレイヤー</span><span className="trail">{`${p.online} / ${p.max} 人`}</span></div>
+      {p.sample.length > 0 && <div className="row"><span className="muted small" translate="no">{p.sample.join("、")}{p.online > p.sample.length ? " …" : ""}</span></div>}
+      <div className="row"><span>応答の速さ</span><span className="trail">{`${p.latency} ms`}</span></div>
+      {p.version && <div className="row"><span>バージョン</span><span className="trail muted" translate="no">{p.version}</span></div>}
+    </section>
   );
 }
 
@@ -522,12 +827,14 @@ function Changes({ id, edit, items, onChange }: { id: string; edit: boolean; ite
         {shown.map((c) => (
           <div className={`row${c.undone ? " faded" : ""}`} key={c.id}>
             <span className="main">
-              <span><span translate="no">{c.title}</span>{` を${c.action === "外す" ? "外した" : c.action === "更新" ? "更新した" : "入れた"}`}</span>
+              <span><span translate="no">{c.title}</span>{` を${({ 外す: "外した", 更新: "更新した", 無効にする: "無効にした", 有効にする: "有効にした" } as Record<string, string>)[c.action] ?? "入れた"}`}{c.config && <span className="badge muted-badge">設定も退避</span>}</span>
               <span className="muted small" translate="no">{new Date(c.at).toLocaleString("ja-JP")}{c.by ? ` · ${c.by}` : ""}{c.action === "更新" && c.version ? ` · 前の版 ${c.version}` : ""}{c.undone ? " · 元に戻しました" : ""}</span>
             </span>
             {edit && c.undoable && (
               <button className="trail link" type="button" disabled={!!busy} onClick={async () => {
-                if (!confirm(c.action === "外す" ? `${c.title} を元に戻しますか?(外したファイルを戻します)` : c.action === "入れる" ? `${c.title} を外しますか?(入れる前に戻します)` : `${c.title} を前の版(${c.version})に戻しますか?(戻したあとは「更新を止める」になります)`)) return;
+                if (!confirm(c.action === "外す" ? `${c.title} を元に戻しますか?(外したファイルを戻します)` : c.action === "入れる" ? `${c.title} を外しますか?(入れる前に戻します)`
+                  : c.action === "無効にする" ? `${c.title} を有効に戻しますか?` : c.action === "有効にする" ? `${c.title} を無効に戻しますか?`
+                  : `${c.title} を前の版(${c.version})に戻しますか?(戻したあとは「更新を止める」になります)`)) return;
                 setBusy(c.id);
                 setError("");
                 try {
@@ -546,6 +853,153 @@ function Changes({ id, edit, items, onChange }: { id: string; edit: boolean; ite
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
       <p className="foot">外したファイルは消さずに名前を変えて残すので、元に戻せます(1 台につき新しい 30 件まで)。変更はサーバーの再起動で反映されます。</p>
+      <p className="foot">プラグインを外す・入れ替えるときは、設定フォルダ(plugins/〈名前〉/)も plugins/.craftshelf-config に退避し、元に戻すと設定も戻します(ファイルが 100 個・20 MB を超えるフォルダは退避しません)。</p>
+    </>
+  );
+}
+
+const DAY_NAMES = ["日", "月", "火", "水", "木", "金", "土"];
+const sizeOf = (n: number | null) => (n === null ? "" : n >= 1024 * 1024 * 1024 ? `${(n / 1024 / 1024 / 1024).toFixed(1)} GB` : n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
+
+// ワールドのバックアップ(編集者以上が作る・消す・ダウンロード。予約・残す数・置き場所は管理者以上)
+function Worlds({ id, admin }: { id: string; admin: boolean }) {
+  const load = useServerFn(worldBackups);
+  const create = useServerFn(createWorldBackup);
+  const remove = useServerFn(removeWorldBackup);
+  const save = useServerFn(setWorldBackup);
+  const restore = useServerFn(restoreWorldBackup);
+  const [opt, setOpt] = useState({ stop: false, truncate: false });
+  const [d, setD] = useState<Awaited<ReturnType<typeof worldBackups>> | null>(null);
+  const [draft, setDraft] = useState<Awaited<ReturnType<typeof worldBackups>>["settings"] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const reload = () => load({ data: { id } }).then((x) => { setD(x); setDraft((old) => old ?? x.settings); }, (e) => setError(message(e)));
+  useEffect(() => { reload(); }, [id]);
+  // 作っている間は、終わるまで一覧を読み直す
+  useEffect(() => {
+    if (!d?.running) return;
+    const t = setTimeout(reload, 3000);
+    return () => clearTimeout(t);
+  }, [d]);
+  if (!d || !draft) return error ? <p className="row error" role="alert">{error}</p> : null;
+
+  const act = async (fn: () => Promise<unknown>, done = "") => {
+    setBusy(true);
+    setError("");
+    setNote("");
+    try {
+      const r = await fn();
+      setNote(typeof r === "string" ? r : done);
+      await reload();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const ptero = d.kind === "ptero";
+  return (
+    <>
+      <div className="group-title">ワールドのバックアップ</div>
+      <section className="group">
+        {!d.available && <div className="row muted">フォルダのサーバー・エージェントのワールドのバックアップは、自分用の版だけで使えます。</div>}
+        {d.available && (
+          <button className="row link" type="button" disabled={busy || d.running} onClick={() => act(() => create({ data: { id } }), "")}>
+            {d.running ? "バックアップしています…(終わると下に出ます)" : "いまバックアップする"}
+          </button>
+        )}
+        {!d.running && d.last && (d.last.ok
+          ? <div className="row muted" role="status">{`作りました: ${new Date(d.last.at).toLocaleString("ja-JP")}`}</div>
+          : <div className="row error" role="alert">{`作れませんでした: ${d.last.message}`}</div>)}
+        {d.error && <div className="row error" role="alert">{d.error}</div>}
+        {d.available && !d.error && d.backups.length === 0 && <div className="row muted">まだありません。</div>}
+        {d.backups.map((b) => (
+          <div className="row" key={b.name}>
+            <span className="main">
+              <span>{b.at ? new Date(b.at).toLocaleString("ja-JP") : ""}</span>
+              <span className="muted small" translate="no">{b.label}{b.size !== null ? ` · ${sizeOf(b.size)}` : ""}</span>
+            </span>
+            {!b.done && <span className="badge">作っています</span>}
+            {b.done && !b.ok && <span className="badge muted-badge">失敗</span>}
+            {b.locked && <span className="badge muted-badge">鍵つき</span>}
+            {b.done && b.ok && <a className="trail link" href={`/api/worlds/${id}/${b.name}`} download>ダウンロード</a>}
+            {admin && b.done && b.ok && (
+              <button className="link danger" type="button" disabled={busy || d.running} onClick={() => {
+                const what = new Date(b.at).toLocaleString("ja-JP");
+                if (!confirm(ptero
+                  ? `${what} のバックアップから戻しますか?サーバーは止まり、サーバー全体がこのときの状態に戻ります${opt.truncate ? "(今のファイルはすべて消えます)" : ""}。`
+                  : `${what} のバックアップからワールドを戻しますか?今のワールドは名前を変えて残します。`)) return;
+                if (!confirm(ptero ? "もう一度確かめます。本当に戻しますか?" : `もう一度確かめます。サーバーが止まっていることを確かめましたか?${opt.stop ? "(動いていたら止めます)" : "(動いていれば戻しません)"}`)) return;
+                act(async () => {
+                  const r = await restore({ data: { id, name: b.name, ...opt } });
+                  return (ptero ? "パネルが戻しています(終わるとサーバーを起動できます)" : `戻しました(${r.files} ファイル)${r.aside.length ? `。前のワールドは ${r.aside.join("・")} に残しています` : ""}`);
+                });
+              }}>戻す</button>
+            )}
+            {!b.locked && b.done && (
+              <button className="link danger" type="button" disabled={busy} onClick={() => {
+                if (confirm(`${b.label} を消しますか?`)) act(() => remove({ data: { id, name: b.name } }), "消しました");
+              }}>消す</button>
+            )}
+          </div>
+        ))}
+        {admin && d.backups.length > 0 && (ptero
+          ? <label className="row"><span>戻すときに、今のファイルを消してから戻す</span><input className="trail" type="checkbox" checked={opt.truncate} onChange={(e) => setOpt({ ...opt, truncate: e.target.checked })} /></label>
+          : <label className="row"><span>戻すときに、動いていたら止める</span><input className="trail" type="checkbox" checked={opt.stop} onChange={(e) => setOpt({ ...opt, stop: e.target.checked })} /></label>)}
+        {note && <p className="row muted" role="status">{note}</p>}
+        {error && <p className="row error" role="alert">{error}</p>}
+      </section>
+      {admin && d.available && (
+        <section className="group form">
+          <div className="row">
+            <span>予約</span>
+            <select className="trail" value={draft.mode} aria-label="ワールドのバックアップの予約" onChange={(e) => setDraft({ ...draft, mode: e.target.value })}>
+              <option value="off">しない</option>
+              <option value="daily">毎日</option>
+              <option value="weekly">毎週</option>
+            </select>
+          </div>
+          {draft.mode === "weekly" && (
+            <div className="row">
+              <span>曜日</span>
+              <select className="trail" value={draft.dow} aria-label="バックアップする曜日" onChange={(e) => setDraft({ ...draft, dow: Number(e.target.value) })}>
+                {DAY_NAMES.map((n, i) => <option key={i} value={i}>{`${n}曜日`}</option>)}
+              </select>
+            </div>
+          )}
+          {draft.mode !== "off" && (
+            <div className="row">
+              <span>時刻</span>
+              <input className="trail" type="time" value={draft.time} aria-label="バックアップする時刻" onChange={(e) => setDraft({ ...draft, time: e.target.value })} />
+            </div>
+          )}
+          <div className="row">
+            <span>残す数</span>
+            <select className="trail" value={draft.keep} aria-label="残すバックアップの数" onChange={(e) => setDraft({ ...draft, keep: Number(e.target.value) })}>
+              {[1, 2, 3, 5, 7, 10, 14, 20, 30].map((n) => <option key={n} value={n}>{`${n} 個`}</option>)}
+            </select>
+          </div>
+          {!ptero && (
+            <div className="row">
+              <span>置き場所</span>
+              <select className="trail" value={draft.targetId ?? ""} aria-label="バックアップの置き場所" onChange={(e) => setDraft({ ...draft, targetId: e.target.value || null })}>
+                <option value="">パネルの中</option>
+                {d.targets.map((t) => <option key={t.id} value={t.id} translate="no">{t.name}</option>)}
+              </select>
+            </div>
+          )}
+          {d.settings.lastRunAt && <div className="row muted">{`前に予約で動いたとき: ${new Date(d.settings.lastRunAt).toLocaleString("ja-JP")}`}</div>}
+          <button className="row link" type="button" disabled={busy} onClick={() => act(async () => {
+            await save({ data: { id, ...draft, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+            setDraft(null);
+          }, "保存しました")}>保存</button>
+        </section>
+      )}
+      <p className="foot">{ptero
+        ? "Pterodactyl のパネルのバックアップを使います。ワールドだけでなく、サーバー全体(.pteroignore で除いたものを除く)が入り、パネルの置き場所に残ります。作れる数の上限はパネルの設定しだいです。残す数を超えたら、このパネルが作った古いもの(鍵つきを除く)を消します。"
+        : "ワールド(server.properties の level-name と、その _nether・_the_end のフォルダ)を tar.gz にまとめます。RCON が使えれば、まとめる間はワールドの保存を止めます(save-off)。1 つ 100 MB を超えるファイルと読めなかったファイルは飛ばし、操作の記録に書きます。"}
+        {" 予約の時刻は、保存したときのブラウザの時間帯です。結果は操作の記録に残り、失敗したらお知らせと Discord(「エラー」「バックアップ」を選んでいれば)で知らせます。予約・残す数・置き場所を決められるのは管理者以上です。"}</p>
     </>
   );
 }

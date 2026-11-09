@@ -1,10 +1,10 @@
 // サーバーの操作: コンソールへのコマンドと、設定ファイルの閲覧・編集(保存する前の中身は履歴に残す)。
-// 設定ファイルにはパスワードなどが入っていることがあるので、見る・直すのは管理者以上。どの処理も、選んでいるチームの中だけ
+// 設定ファイルにはパスワードなどが入っていることがあるので、見る・直すのは権限 files:edit のある人(管理者以上・チームで決めれば編集者も・メンバーごとに足した人)。どの処理も、選んでいるチームの中だけ
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
-import { serverFileHistory, user } from "./db/schema";
+import { serverFileHistory, teamOption, user } from "./db/schema";
 import { eventService } from "./events";
-import { HttpError, requireTeam } from "./guard";
+import { HttpError, allowed, requireTeam } from "./guard";
 import { type Deps, remote, serverOf } from "./servers";
 import { alignAll, splitLines } from "~/lib/diff";
 
@@ -33,6 +33,12 @@ export function fileService(deps: Deps) {
   const { db, auth } = deps;
   const { record } = eventService(deps);
 
+  const editorFiles = async (teamId: string) =>
+    (await db.select({ on: teamOption.editorFiles }).from(teamOption).where(eq(teamOption.teamId, teamId)))[0]?.on ?? false;
+
+  // 設定ファイルを見る・直してよいか(権限 files:edit): 管理者以上・チームが許していれば編集者・メンバーごとに足した人(03.60.00 から)
+  const needFiles = (headers: Headers) => requireTeam(auth, headers, { files: ["edit"] });
+
   async function readText(target: Awaited<ReturnType<typeof serverOf>>, path: string) {
     const name = path.split("/").pop() ?? "";
     const dir = path.split("/").slice(0, -1).join("/");
@@ -45,6 +51,19 @@ export function fileService(deps: Deps) {
   }
 
   return {
+    /** 設定ファイルを見る・直せるか(画面でボタンを出すか決める)と、編集者にも許しているか */
+    async access(headers: Headers) {
+      const { teamId } = await requireTeam(auth, headers);
+      return { allowed: await allowed(auth, headers, { files: ["edit"] }), editors: await editorFiles(teamId) };
+    },
+
+    /** 編集者にも設定ファイルを見る・直すのを許す・やめる(管理者以上) */
+    async setEditorFiles(headers: Headers, on: boolean) {
+      const { teamId, user: me } = await requireTeam(auth, headers, { member: ["update"] });
+      await db.insert(teamOption).values({ teamId, editorFiles: on }).onConflictDoUpdate({ target: teamOption.teamId, set: { editorFiles: on, updatedAt: new Date() } });
+      await record({ teamId, userId: me.id, kind: "admin", action: on ? "編集者にも設定ファイルを許す" : "設定ファイルを管理者以上だけにする" });
+    },
+
     /** コンソールにコマンドを送る(編集者以上)。結果はコンソールに出る(ここでは受け取らない) */
     async command(headers: Headers, serverId: string, command: string) {
       const who = await requireTeam(auth, headers, { server: ["control"] });
@@ -76,7 +95,7 @@ export function fileService(deps: Deps) {
 
     /** フォルダーの中身(フォルダーと、開けるファイルが分かるように) */
     async list(headers: Headers, serverId: string, dir: string) {
-      const who = await requireTeam(auth, headers, { server: ["update"] });
+      const who = await needFiles(headers);
       const { teamId } = who;
       const target = await serverOf(deps, who, serverId);
       const d = cleanPath(dir);
@@ -93,7 +112,7 @@ export function fileService(deps: Deps) {
      * 中身を読んで数える(Pterodactyl は大きさが違うものだけ。読まなかったものは lines: null で、大きさで見る)
      */
     async configs(headers: Headers, serverIds: string[]) {
-      const who = await requireTeam(auth, headers, { server: ["update"] });
+      const who = await needFiles(headers);
       const { teamId } = who;
       const ids = [...new Set(serverIds)].slice(0, 8);
       if (ids.length < 2) throw new HttpError(400, "比べるサーバーを 2 台以上選んでください");
@@ -167,7 +186,7 @@ export function fileService(deps: Deps) {
 
     /** ファイルを開く(と、その履歴) */
     async read(headers: Headers, serverId: string, path: string) {
-      const who = await requireTeam(auth, headers, { server: ["update"] });
+      const who = await needFiles(headers);
       const { teamId } = who;
       const p = cleanPath(path);
       if (!p || !editable(p)) throw new HttpError(400, "ここで開けるのは、テキストの設定ファイルだけです");
@@ -184,7 +203,7 @@ export function fileService(deps: Deps) {
      * 保存する前の中身は履歴に残す(1 つのファイルにつき新しい 30 件)
      */
     async save(headers: Headers, serverId: string, path: string, content: string, base: string) {
-      const who = await requireTeam(auth, headers, { server: ["update"] });
+      const who = await needFiles(headers);
       const { teamId, user: me } = who;
       const p = cleanPath(path);
       if (!p || !editable(p)) throw new HttpError(400, "ここで直せるのは、テキストの設定ファイルだけです");
@@ -204,7 +223,7 @@ export function fileService(deps: Deps) {
 
     /** 履歴の中身(戻す前に見る) */
     async historyContent(headers: Headers, serverId: string, historyId: string) {
-      const who = await requireTeam(auth, headers, { server: ["update"] });
+      const who = await needFiles(headers);
       const { teamId } = who;
       await serverOf(deps, who, serverId); // ほかのチームのサーバーは「見つからない」
       const [h] = await db.select().from(serverFileHistory).where(and(eq(serverFileHistory.id, historyId), eq(serverFileHistory.serverId, serverId)));

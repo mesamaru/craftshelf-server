@@ -1,11 +1,13 @@
 // API トークン(cs_…)の作成・一覧・削除。トークンは選んでいるチームのもので、作った人のそのチームでの役割で動く。
-// 「読み取りだけ」にすると、変える操作(入れる・起動など)はできない。トークンそのものは作ったときにだけ返す
-import { HttpError, apiKeyOf, requireTeam } from "./guard";
+// 範囲(読む・Mod・プラグインを変える・サーバーを操作する・管理)を選べ、選ばなかった操作はできない。範囲は作った人の権限(役割とメンバーごとの足し引き)を超えられず、使うときも作った人の今の権限の分だけ。
+// トークンそのものは作ったときにだけ返す
+import { SCOPE_LABELS, type TokenScope, isTokenScope, permsAllowScope } from "~/lib/permissions";
+import { HttpError, apiKeyOf, memberPerms, requireTeam, scopesOf } from "./guard";
 import type { Deps } from "./servers";
 import { eventService } from "./events";
 
 export const TOKEN_LIMITS = { perUserTeam: 20, maxDays: 365 };
-type Meta = { teamId?: string; readOnly?: boolean };
+type Meta = { teamId?: string; readOnly?: boolean; scopes?: unknown };
 const metaOf = (m: unknown): Meta => {
   try {
     return (typeof m === "string" ? JSON.parse(m) : m ?? {}) as Meta;
@@ -30,26 +32,31 @@ export function tokenService(deps: Deps) {
       const keys = (await auth.api.listApiKeys({ headers })) as unknown as { apiKeys?: unknown[] } | unknown[];
       const arr = (Array.isArray(keys) ? keys : keys.apiKeys ?? []) as { id: string; name: string | null; start: string | null; prefix: string | null; createdAt: Date; expiresAt: Date | null; lastRequest: Date | null; metadata: unknown }[];
       return arr.filter((k) => metaOf(k.metadata).teamId === teamId).map((k) => ({
-        id: k.id, name: k.name ?? "", start: k.start ?? k.prefix ?? "cs_", readOnly: !!metaOf(k.metadata).readOnly,
+        id: k.id, name: k.name ?? "", start: k.start ?? k.prefix ?? "cs_", scopes: scopesOf(metaOf(k.metadata)), readOnly: scopesOf(metaOf(k.metadata)).length === 1,
         createdAt: new Date(k.createdAt).toISOString(), expiresAt: k.expiresAt ? new Date(k.expiresAt).toISOString() : null,
         lastUsed: k.lastRequest ? new Date(k.lastRequest).toISOString() : null,
       }));
     },
 
-    /** トークンを作る(days が 0 なら期限なし)。返す key は、このときにしか見られない */
-    async create(headers: Headers, input: { name: string; readOnly: boolean; days: number }) {
+    /** トークンを作る(days が 0 なら期限なし。scopes に read は必ず入る)。返す key は、このときにしか見られない */
+    async create(headers: Headers, input: { name: string; scopes: string[]; days: number }) {
       needSession(headers);
       const { teamId, user } = await requireTeam(auth, headers);
+      if (!Array.isArray(input.scopes) || !input.scopes.every(isTokenScope)) throw new HttpError(400, "トークンの範囲を選んでください");
+      const scopes = [...new Set<TokenScope>(["read", ...input.scopes])];
+      const perms = (await memberPerms(auth, teamId, user.id)) ?? new Set<string>();
+      const over = scopes.filter((x) => !permsAllowScope(perms, x));
+      if (over.length) throw new HttpError(403, `あなたの権限では、この範囲のトークンは作れません(${over.map((x) => SCOPE_LABELS[x]).join("、")})`);
       const name = String(input.name ?? "").trim().slice(0, 60);
       if (!name) throw new HttpError(400, "トークンの名前(使い道)を入力してください");
       const days = Math.floor(Number(input.days) || 0);
       if (days < 0 || days > TOKEN_LIMITS.maxDays) throw new HttpError(400, `期限は 0(期限なし)〜${TOKEN_LIMITS.maxDays} 日にしてください`);
       if ((await this.list(headers)).length >= TOKEN_LIMITS.perUserTeam) throw new HttpError(400, `トークンは 1 つのチームで ${TOKEN_LIMITS.perUserTeam} 個までです`);
       const r = await auth.api.createApiKey({
-        body: { name, userId: user.id, prefix: "cs_", metadata: { teamId, readOnly: !!input.readOnly }, expiresIn: days ? days * 86400 : null,
+        body: { name, userId: user.id, prefix: "cs_", metadata: { teamId, scopes, readOnly: scopes.length === 1 }, expiresIn: days ? days * 86400 : null,
           rateLimitEnabled: true, rateLimitTimeWindow: 60_000, rateLimitMax: 120 },
       });
-      await record({ teamId, userId: user.id, kind: "admin", action: "API トークンを作る", target: name, detail: input.readOnly ? "読み取りだけ" : "役割のとおり" });
+      await record({ teamId, userId: user.id, kind: "admin", action: "API トークンを作る", target: name, detail: scopes.map((x) => SCOPE_LABELS[x]).join("、") });
       return { id: r.id, key: r.key };
     },
 

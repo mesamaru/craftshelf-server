@@ -165,19 +165,26 @@ describe("ライブラリ(チームの目録)", () => {
     await lib.install(editor, id, PID);
     let cat = await lib.catalog(viewer);
     expect(cat.items.map((i) => [i.title, i.projectType, i.installs.map((x) => `${x.serverName} ${x.versionNumber}`)])).toEqual([["LuckPerms", "plugin", ["サバイバル 5.5.0"]]]);
-    expect(cat.servers).toEqual([{ id, name: "サバイバル", type: "plugin" }]);
+    expect(cat.servers).toEqual([{ id, name: "サバイバル", type: "plugin", kinds: ["plugin", "datapack"] }]);
     await lib.remove(editor, id, "LuckPerms-5.5.0.jar");
     cat = await lib.catalog(viewer);
     expect(cat.items[0].installs).toEqual([]);
   });
 
-  it("種類だけで探して足せる。プラグインと Mod 以外は断る。足せるのは編集者以上", async () => {
+  it("種類だけで探して足せる(リソースパックなども。クライアントで使うものはサーバーで動くかで絞らない)。足せるのは編集者以上", async () => {
     await lib.searchCatalog(viewer, "sod", "mod");
     expect(lastSearch).toContain("project_type:mod");
     expect(lastSearch).not.toContain("categories:");
-    expect(await code(lib.searchCatalog(viewer, "", "resourcepack"))).toBe(400);
+    expect(lastSearch).toContain("server_side");
+    await lib.searchCatalog(viewer, "", "resourcepack");
+    expect(lastSearch).toContain("project_type:resourcepack");
+    expect(lastSearch).not.toContain("server_side");
+    expect(await code(lib.searchCatalog(viewer, "", "world"))).toBe(400);
+    expect(await code(lib.searchCatalog(viewer, "", "shader", "spigot"))).toBe(400);
     expect(await code(lib.addItem(viewer, "AANobbMI"))).toBe(403);
-    expect(await code(lib.addItem(editor, "RPRPRPRP"))).toBe(400);
+    const rp = await lib.addItem(editor, "RPRPRPRP");
+    expect((await lib.catalog(viewer)).items.find((i) => i.id === rp.id)?.projectType).toBe("resourcepack");
+    await lib.removeItem(editor, rp.id);
     expect(await code(lib.addItem(editor, "Missing1"))).toBe(404);
     await lib.addItem(editor, "AANobbMI");
     await lib.addItem(editor, "AANobbMI"); // 2 回足しても 1 件
@@ -198,6 +205,52 @@ describe("ライブラリ(チームの目録)", () => {
     expect(await code(lib.removeItem(viewer, item.id))).toBe(403);
     await lib.removeItem(editor, item.id);
     expect((await lib.catalog(viewer)).items.map((i) => i.title)).toEqual(["LuckPerms"]);
+  });
+});
+
+describe("タグ・お気に入り・更新あり", () => {
+  const lp = async (h: Headers) => (await lib.catalog(h)).items.find((i) => i.title === "LuckPerms")!;
+
+  it("タグは編集者以上が付け外しでき、チームの中で共有。ほかのチームのものには付けられない", async () => {
+    const { id: itemId } = await lp(viewer);
+    expect(await code(lib.tagItems(viewer, [itemId], "権限", true))).toBe(403);
+    expect(await code(lib.tagItems(editor, [itemId], "  ", true))).toBe(400);
+    expect(await code(lib.tagItems(editor, [itemId], "x".repeat(31), true))).toBe(400);
+    expect(await code(lib.tagItems(outsider, [itemId], "権限", true))).toBe(404);
+    await lib.tagItems(editor, [itemId, "missing"], " 権限 ", true);
+    await lib.tagItems(owner, [itemId], "権限", true); // 2 回付けても 1 つ
+    expect((await lp(viewer)).tags).toEqual(["権限"]);
+    expect((await lib.catalog(outsider)).items).toEqual([]);
+    for (let n = 0; n < 19; n++) await lib.tagItems(editor, [itemId], `t${n}`, true);
+    expect(await code(lib.tagItems(editor, [itemId], "多すぎ", true))).toBe(400);
+    for (let n = 0; n < 19; n++) await lib.tagItems(editor, [itemId], `t${n}`, false);
+    expect(await code(lib.tagItems(viewer, [itemId], "権限", false))).toBe(403);
+    await lib.tagItems(editor, [itemId], "権限", false);
+    expect((await lp(viewer)).tags).toEqual([]);
+  });
+
+  it("お気に入りは利用者ごと。閲覧者もできる。ほかのチームのものはできない", async () => {
+    const { id: itemId } = await lp(viewer);
+    await lib.favorite(viewer, itemId, true);
+    await lib.favorite(viewer, itemId, true);
+    expect((await lp(viewer)).favorite).toBe(true);
+    expect((await lp(editor)).favorite).toBe(false);
+    expect(await code(lib.favorite(outsider, itemId, true))).toBe(404);
+    await lib.favorite(viewer, itemId, false);
+    expect((await lp(viewer)).favorite).toBe(false);
+  });
+
+  it("どこかのサーバーに古い版が入っていれば「更新あり」。更新を止めたものは入れない", async () => {
+    const { id: itemId } = await lp(viewer);
+    await lib.install(editor, id, PID);
+    expect(await lib.outdated(viewer)).toEqual([]);
+    latest = { id: "ver00004", number: "5.6.0", filename: "LuckPerms-5.6.0.jar", url: "" };
+    expect(await lib.outdated(viewer)).toEqual([itemId]);
+    expect(await lib.outdated(outsider)).toEqual([]);
+    await lib.setHold(editor, id, "modrinth", PID, true);
+    expect(await lib.outdated(viewer)).toEqual([]);
+    await lib.setHold(editor, id, "modrinth", PID, false);
+    latest = { id: "ver00002", number: "5.5.0", filename: "LuckPerms-5.5.0.jar", url: "" };
   });
 });
 

@@ -1,6 +1,6 @@
 // アプリの表(認証の表は auth-schema.ts)。変更は「足すだけ」
 import { boolean, index, integer, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-import { organization, user } from "./auth-schema";
+import { member, organization, user } from "./auth-schema";
 
 // チームが登録した Pterodactyl パネル(API キーは暗号化して保存)
 export const pteroConnection = pgTable(
@@ -29,6 +29,12 @@ export const server = pgTable(
     pteroConnectionId: text("ptero_connection_id").references(() => pteroConnection.id, { onDelete: "cascade" }),
     remoteId: text("remote_id"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // 自動更新(03.49.00 から): 入れておくと、6 時間ごとに新しい版があれば入れる。auto_updated_at は最後に確かめた時刻
+    autoUpdate: boolean("auto_update").notNull().default(false),
+    autoUpdatedAt: timestamp("auto_updated_at"),
+    // 新しい版の見回り(03.51.00 から): 最後に確かめた時刻と、そのとき知らせた「新しい版」の行(同じものを 2 度知らせない)
+    updateCheckedAt: timestamp("update_checked_at"),
+    updateNotice: text("update_notice").notNull().default(""),
   },
   (t) => [
     index("server_team_idx").on(t.teamId),
@@ -70,7 +76,7 @@ export const legacyTotp = pgTable("legacy_totp", {
 });
 
 // チームのライブラリ(使う Mod・プラグインの目録)。ファイルは持たず、配布元のプロジェクトだけを記録する。
-// サーバーに入れたものは自動で載る。project_type = "plugin" / "mod"
+// サーバーに入れたものは自動で載る。project_type = "plugin" / "mod"(03.58.00 から "datapack" / "resourcepack" / "shader" / "modpack" も)
 export const libraryItem = pgTable(
   "library_item",
   {
@@ -84,8 +90,33 @@ export const libraryItem = pgTable(
     iconUrl: text("icon_url").notNull().default(""),
     addedBy: text("added_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // 03.56.00 から。channel = 受け取る版("" = チームの既定 / release = 正式版だけ / all = ベータ・アルファも)。
+    // loaders・mc_versions = 管理者が直した、動く作り・対応 MC(JSON の配列。"" = 直していない = 配布元のとおり)。
+    // upstream_mc = 配布元の情報から取った対応 MC(JSON の配列)と、取った時刻 info_at(1 日ごとに取り直す)
+    channel: text("channel").notNull().default(""),
+    loaders: text("loaders").notNull().default(""),
+    mcVersions: text("mc_versions").notNull().default(""),
+    upstreamMc: text("upstream_mc").notNull().default("[]"),
+    infoAt: timestamp("info_at"),
+    // Modパック(03.58.00 から): 最後にセットを作った・サーバーに入れた版と、配布元のいちばん新しい版(JSON の
+    // { used: { id, number }, latest: { id, number } }。"" = まだ使っていない)。新しい版を知らせるのに使う
+    pack: text("pack").notNull().default(""),
+    // 03.61.00 から。配布元のファイルを保存先に保存するか("" = チームの既定 / on / off)と、古い版を残す数(null = チームの既定・0 = 整理しない)
+    keepFiles: text("keep_files").notNull().default(""),
+    keepVersions: integer("keep_versions"),
   },
   (t) => [uniqueIndex("library_item_team_project_uq").on(t.teamId, t.source, t.projectId)],
+);
+
+// 手で決めた前提(03.56.00 から): item_id を入れるサーバーには dep_item_id も要る(配布元が前提を知らないとき)
+export const libraryDep = pgTable(
+  "library_dep",
+  {
+    itemId: text("item_id").notNull().references(() => libraryItem.id, { onDelete: "cascade" }),
+    depItemId: text("dep_item_id").notNull().references(() => libraryItem.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.itemId, t.depItemId] })],
 );
 
 // セット: ライブラリから選んだものの組み合わせ。サーバーにまとめて入れる
@@ -107,8 +138,33 @@ export const addonSetItem = pgTable(
     setId: text("set_id").notNull().references(() => addonSet.id, { onDelete: "cascade" }),
     itemId: text("item_id").notNull().references(() => libraryItem.id, { onDelete: "cascade" }),
     addedAt: timestamp("added_at").defaultNow().notNull(),
+    // 03.59.00 から。この版に固定する(配布元の版の ID・アップロードしたものはファイルの ID。null = いつもサーバーに合う新しい版)
+    versionId: text("version_id"),
+    versionNumber: text("version_number").notNull().default(""),
   },
   (t) => [primaryKey({ columns: [t.setId, t.itemId] })],
+);
+
+// ライブラリのタグ(チームの中で共有。チームはアイテムからたどる)
+export const libraryTag = pgTable(
+  "library_tag",
+  {
+    itemId: text("item_id").notNull().references(() => libraryItem.id, { onDelete: "cascade" }),
+    tag: text("tag").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.itemId, t.tag] })],
+);
+
+// ライブラリのお気に入り(利用者ごと)
+export const libraryFavorite = pgTable(
+  "library_favorite",
+  {
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    itemId: text("item_id").notNull().references(() => libraryItem.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.itemId] })],
 );
 
 // ポート管理: 種類(表の列)。mode = group(開始番号 + グループ番号から size 個)/ fixed(from–to)/ free(自由)。
@@ -206,6 +262,29 @@ export const teamNotify = pgTable("team_notify", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// チームの決めごと(03.52.00 から)。editor_files = 編集者にも設定ファイルを見る・直すのを許す(既定は管理者以上だけ)
+export const teamOption = pgTable("team_option", {
+  teamId: text("team_id").primaryKey().references(() => organization.id, { onDelete: "cascade" }),
+  editorFiles: boolean("editor_files").notNull().default(false),
+  // 03.56.00 から。受け取る版の既定(release = 正式版だけ / all = ベータ・アルファも)。アイテムごとに変えられる
+  channel: text("channel").notNull().default("release"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  // 03.61.00 から。配布元のファイルを保存する(チームの既定)と、古い版を残す数(0 = 整理しない)
+  keepFiles: boolean("keep_files").notNull().default(false),
+  keepVersions: integer("keep_versions").notNull().default(0),
+});
+
+// お知らせ(ベル)をどこまで読んだか(利用者 × チーム。どの端末でも同じにする)
+export const noticeSeen = pgTable(
+  "notice_seen",
+  {
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    teamId: text("team_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    seenAt: timestamp("seen_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.teamId] })],
+);
+
 // チームの予約: 決めた曜日・時刻に、セットを結び付けたサーバーをそろえる(mode = sync)か、確かめるだけ(check)。
 // days は曜日(0 = 日曜)の JSON の配列、time は "HH:MM"(tz の時刻)
 export const teamSchedule = pgTable("team_schedule", {
@@ -293,6 +372,8 @@ export const libraryFile = pgTable(
     mcVersions: text("mc_versions").notNull().default("[]"),
     uploadedBy: text("uploaded_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // 03.61.00 から。配布元のものを保存した版は、配布元の版の ID("" = アップロードしたもの)
+    upstreamVersionId: text("upstream_version_id").notNull().default(""),
   },
   (t) => [index("library_file_item_idx").on(t.itemId), index("library_file_sha_idx").on(t.sha256)],
 );
@@ -335,6 +416,8 @@ export const shareLink = pgTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
     expiresAt: timestamp("expires_at").notNull(),
     downloads: integer("downloads").notNull().default(0),
+    // ダウンロードできる回数の上限(03.55.00 から。null = 上限なし)。無期限のリンクは expires_at を 9999 年にする
+    maxDownloads: integer("max_downloads"),
   },
   (t) => [uniqueIndex("share_link_token_uq").on(t.tokenHash), index("share_link_team_idx").on(t.teamId)],
 );
@@ -361,7 +444,7 @@ export const memberServer = pgTable(
   (t) => [primaryKey({ columns: [t.teamId, t.userId, t.serverId] })],
 );
 
-// サーバー本体(jar)を入れ替えた記録。入れ替える前の jar は backup_jar の名前で 1 つだけ残し、そこへ戻せる。
+// サーバー本体(jar)を入れ替えた記録。入れ替える前の jar は old_jars に 5 つまで残し(03.53.00 までは backup_jar の 1 つだけ)、そこへ戻せる。
 // size は入れ替えたときの jar の大きさ(同じなら、入れ替えたビルドのまま。サーバーを再起動するまで version_history.json は古いため)
 export const serverSoftware = pgTable("server_software", {
   serverId: text("server_id").primaryKey().references(() => server.id, { onDelete: "cascade" }),
@@ -372,6 +455,10 @@ export const serverSoftware = pgTable("server_software", {
   backupJar: text("backup_jar").notNull().default(""),
   backupBuild: text("backup_build").notNull().default(""),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  // 03.54.00 から: サーバー本体の種類(src/lib/software.ts。空ならサーバーの種類と同じ)と、
+  // 入れ替える前の jar(新しい順に 5 つまで。[{ file, build, mc, at }] の JSON。いちばん新しいものは backup_jar にも書く)
+  software: text("software").notNull().default(""),
+  oldJars: text("old_jars").notNull().default("[]"),
 });
 
 // サーバーのアドオンの変更の履歴(v02 の「履歴と巻き戻し」)。removed は外した・入れ替えたファイルの記録(JSON)、
@@ -388,6 +475,8 @@ export const serverChange = pgTable(
     removed: text("removed").notNull().default(""),
     backup: text("backup").notNull().default(""),
     undone: boolean("undone").notNull().default(false),
+    // 退避したプラグインの設定フォルダ(<dir>/.craftshelf-config/ の下の "<key>/<フォルダ名>"。03.49.00 から)
+    configBackup: text("config_backup").notNull().default(""),
     at: timestamp("at").defaultNow().notNull(),
   },
   (t) => [index("server_change_server_idx").on(t.serverId, t.at)],
@@ -417,4 +506,81 @@ export const agentServer = pgTable("agent_server", {
   serverId: text("server_id").primaryKey().references(() => server.id, { onDelete: "cascade" }),
   agentId: text("agent_id").notNull().references(() => agent.id, { onDelete: "cascade" }),
   key: text("key").notNull(),
+});
+
+// パネルの定期バックアップ(自分用の版だけ。03.53.00 から)。毎日 time(tz の時刻)に作り、新しい keep 個を残す。
+// target_id は置き場所の保存先(null = パネルの中)。手で作るときも同じ置き場所・残す数を使う
+export const backupSchedule = pgTable("backup_schedule", {
+  teamId: text("team_id").primaryKey().references(() => organization.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  time: text("time").notNull().default("04:00"),
+  tz: text("tz").notNull().default("Asia/Tokyo"),
+  keep: integer("keep").notNull().default(5),
+  targetId: text("target_id").references(() => storageTarget.id, { onDelete: "set null" }),
+  lastRunAt: timestamp("last_run_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// ワールドのバックアップの設定(サーバーごと。03.53.00 から)。mode = off / daily / weekly(dow の曜日、0 = 日曜)、time は tz の時刻、
+// keep は残す数。target_id は置き場所の保存先(null = パネルの中)。Pterodactyl はパネルのバックアップを使うので、置き場所は使わない
+export const worldBackup = pgTable("world_backup", {
+  serverId: text("server_id").primaryKey().references(() => server.id, { onDelete: "cascade" }),
+  mode: text("mode").notNull().default("off"),
+  time: text("time").notNull().default("05:00"),
+  dow: integer("dow").notNull().default(0),
+  tz: text("tz").notNull().default("Asia/Tokyo"),
+  keep: integer("keep").notNull().default(5),
+  targetId: text("target_id").references(() => storageTarget.id, { onDelete: "set null" }),
+  lastRunAt: timestamp("last_run_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// サーバーごとの予約(v02 の予約同期。03.55.00 から)。mode = off / daily / weekly(dow の曜日、0 = 日曜)、time は tz の時刻。
+// action = update(入っているものを最新に)/ sync(結び付けたセットでそろえる)。restart = 何か変えたら再起動する。チームの予約(team_schedule)とは別に動く
+export const serverSchedule = pgTable("server_schedule", {
+  serverId: text("server_id").primaryKey().references(() => server.id, { onDelete: "cascade" }),
+  mode: text("mode").notNull().default("off"),
+  action: text("action").notNull().default("update"),
+  time: text("time").notNull().default("04:00"),
+  dow: integer("dow").notNull().default(0),
+  tz: text("tz").notNull().default("Asia/Tokyo"),
+  restart: boolean("restart").notNull().default(false),
+  lastRunAt: timestamp("last_run_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// 処理の一覧(v02 の 01.22「処理」。03.57.00 から)。時間のかかる処理(サーバーへの導入・そろえる・バックアップなど)の状態。
+// state = queued(待ち)/ running(実行中)/ done(成功)/ failed(失敗)。action は操作の記録と同じ言葉。終わってから 30 日で消す
+export const job = pgTable(
+  "job",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    serverId: text("server_id").references(() => server.id, { onDelete: "set null" }),
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+    action: text("action").notNull(),
+    target: text("target").notNull().default(""),
+    state: text("state").notNull().default("running"),
+    detail: text("detail").notNull().default(""),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    startedAt: timestamp("started_at"),
+    finishedAt: timestamp("finished_at"),
+  },
+  (t) => [index("job_team_created_idx").on(t.teamId, t.createdAt)],
+);
+
+// 個人の設定(03.57.00 から)。theme = 見た目の JSON(明るさ・アクセント・テーマ・背景の暗さとぼかし。背景画像はブラウザごと)
+export const userPref = pgTable("user_pref", {
+  userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
+  theme: text("theme"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// メンバーごとに足した・引いた権限(03.60.00 から)。allow・deny は "server:control" の形の JSON の配列(~/lib/permissions の GRANTS)。
+// チームのメンバー(member)ごとなので、ほかのチームには効かず、チームから外すと一緒に消える。オーナーには効かない
+export const memberPerm = pgTable("member_perm", {
+  memberId: text("member_id").primaryKey().references(() => member.id, { onDelete: "cascade" }),
+  allow: text("allow").notNull().default("[]"),
+  deny: text("deny").notNull().default("[]"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

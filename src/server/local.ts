@@ -2,18 +2,19 @@
 // Pterodactyl のクライアント(ptero.ts)と同じ形にして、ライブラリ・セット・予約・ファイルとコマンド・ポートの処理をそのまま使う
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { Socket } from "node:net";
 import { isAbsolute, join, resolve, sep, dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { MC_VERSION, type Platform } from "~/lib/platforms";
+import { BUILD_HOSTS } from "~/lib/software";
 import type { FetchLike } from "./net";
 import { type Allocation, POWER_SIGNALS, type PowerSignal, type PteroClient, PteroError, type RemoteFile, type Resources } from "./ptero";
 
-// フォルダのサーバーへ取ってくるファイルの置き場所(配布元の CDN だけ)
-const PULL_HOSTS = new Set(["cdn.modrinth.com", "api.spiget.org", "cdn.spiget.org", "edge.forgecdn.net", "mediafilez.forgecdn.net"]);
+// フォルダのサーバーへ取ってくるファイルの置き場所(配布元の CDN と、サーバー本体の公式の取得先だけ)
+const PULL_HOSTS = new Set(["cdn.modrinth.com", "api.spiget.org", "cdn.spiget.org", "edge.forgecdn.net", "mediafilez.forgecdn.net", ...BUILD_HOSTS]);
 export const LOCAL_LIMITS = { downloadBytes: 300 * 1024 * 1024, commandSeconds: 120 };
 export type Control = { control: string; startCmd: string; stopCmd: string; container: string; rconPort: number | null; rconPassword: string };
 
@@ -281,7 +282,8 @@ export function localClient(root: string, fetch: FetchLike, control: Control): P
       const dir = inside(root, dirRel);
       for (const f of files) {
         if (/[\\/]/.test(f) || f === "." || f === "..") throw new PteroError("ファイルの名前が正しくありません");
-        await unlink(join(dir, f)).catch((e) => { if (e?.code !== "ENOENT") throw new PteroError(`${f} を消せませんでした`); });
+        // Pterodactyl と同じく、フォルダーなら中身ごと消す(退避した設定フォルダの片付け)
+        await rm(join(dir, f), { recursive: true, force: true }).catch(() => { throw new PteroError(`${f} を消せませんでした`); });
       }
     },
   };
