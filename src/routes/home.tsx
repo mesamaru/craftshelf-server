@@ -1,7 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link, createFileRoute, redirect } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { authClient } from "~/lib/auth-client";
 import { libraryCatalog, outdatedLibraryServers } from "~/lib/library-api";
 import { listBackups } from "~/lib/backup-api";
 import { CUSTOM_TYPES, type Custom, type CustomType, DASH_DEFAULT, DASH_LIMITS, DASH_WIDGETS, type DashLayout, cleanDash, newCustomId } from "~/lib/dash";
@@ -10,9 +9,9 @@ import { LIBRARY_CHANGED } from "~/lib/library-add";
 import { saveMyDash } from "~/lib/prefs-api";
 import { ITEM_TYPES, ITEM_TYPE_IDS } from "~/lib/platforms";
 import { MobileSearch, StoragePill } from "~/lib/shell";
-import { ItemIcon } from "~/lib/type-icon";
+import { AddonIcon } from "~/lib/type-icon";
 import { Btn, Chip, Icon, type IconName, fmtSize } from "~/lib/ui";
-import { useCan } from "~/lib/use-can";
+import { useCan, useTeamKey } from "~/lib/use-can";
 
 export const Route = createFileRoute("/home")({
   beforeLoad: ({ context }) => {
@@ -25,6 +24,7 @@ export const Route = createFileRoute("/home")({
 const message = (e: unknown) => (e instanceof Error ? e.message : "うまくいきませんでした");
 type Catalog = Awaited<ReturnType<typeof libraryCatalog>>;
 type CatItem = Catalog["items"][number];
+const SHOW_SERVERS = 8; // サーバー欄は 8 台まで。残りは「ほか N 台」でサーバーの一覧へ(数十台でもカードが長くならない)
 const SHOW = 4; // 一覧は 4 件まで。あとは「もっと見る」でライブラリへ
 const NAMES = Object.fromEntries(DASH_WIDGETS) as Record<string, string>;
 
@@ -32,7 +32,7 @@ const NAMES = Object.fromEntries(DASH_WIDGETS) as Record<string, string>;
 // 「ウィジェットを編集」で、並べ替え・表示 / 非表示・全幅・メモ / ToDo / 時計 / 今日の日付の追加ができる(並びはアカウントに保存)
 function Home() {
   const { user } = Route.useRouteContext();
-  const { data: team } = authClient.useActiveOrganization();
+  const teamKey = useTeamKey();
   const { can } = useCan(user.id);
   const load = useServerFn(libraryCatalog);
   const outdated = useServerFn(outdatedLibraryServers);
@@ -47,7 +47,7 @@ function Home() {
   const [adding, setAdding] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const reload = () => { load().then((c) => { setCat(c); setError(""); }, (e) => setError(message(e))); };
-  useEffect(reload, [team?.id]);
+  useEffect(() => { if (teamKey !== null) reload(); }, [teamKey]); // チームが分かってから 1 回だけ
   useEffect(() => {
     window.addEventListener(LIBRARY_CHANGED, reload);
     return () => window.removeEventListener(LIBRARY_CHANGED, reload);
@@ -63,7 +63,7 @@ function Home() {
   const check = () => {
     setChecking(true);
     setError("");
-    outdated().then((r) => setOld(new Map(r.map((x) => [x.itemId, x.serverIds]))), (e) => setError(message(e))).finally(() => setChecking(false));
+    outdated({ data: { fresh: true } }).then((r) => setOld(new Map(r.map((x) => [x.itemId, x.serverIds]))), (e) => setError(message(e))).finally(() => setChecking(false));
   };
   const editor = can({ library: ["edit"] });
   const admin = can({ storage: ["manage"] });
@@ -84,7 +84,7 @@ function Home() {
   const pct = items.length ? Math.round((linked.length / items.length) * 100) : 0;
   const itemRow = (i: CatItem, trail: ReactNode) => (
     <Link key={i.id} to="/" search={{ item: i.id }} className="row click">
-      <span className="ic"><ItemIcon type={i.projectType} url={i.iconUrl ?? undefined} /></span>
+      <AddonIcon type={i.projectType} url={i.iconUrl} />
       <span className="mid"><span className="ttl" translate="no">{i.title}</span><span className="sub" translate="no">{i.version || ITEM_TYPES[i.projectType as keyof typeof ITEM_TYPES]}</span></span>
       {trail}<span className="chev" aria-hidden="true">›</span>
     </Link>
@@ -127,7 +127,7 @@ function Home() {
         <div className="card-b">
           {counts.length ? counts.map(([t, n]) => (
             <Link key={t} to="/" search={{ type: t }} className="barrow" title={`${ITEM_TYPES[t]}: ${n} 件`}>
-              <span className="lab"><span className="ic sm"><ItemIcon type={t} /></span><span>{ITEM_TYPES[t]}</span></span>
+              <span className="lab"><AddonIcon type={t} size="sm" /><span>{ITEM_TYPES[t]}</span></span>
               <span className="track"><span className="fill" style={{ width: `${(n / max) * 100}%` }} /></span><span className="n">{n}</span>
             </Link>
           )) : <p className="dash-empty">まだ何も登録されていません</p>}
@@ -151,7 +151,7 @@ function Home() {
           {cat.servers.length === 0 && <p className="dash-empty">まだサーバーがありません</p>}
           {cat.servers.length > 0 && (
             <div className="group flat">
-              {cat.servers.map((s) => {
+              {cat.servers.slice(0, SHOW_SERVERS).map((s) => {
                 const n = items.filter((i) => i.installs.some((x) => x.serverId === s.id)).length;
                 const behind = old ? [...old.values()].filter((ids) => ids.includes(s.id)).length : null;
                 return (
@@ -163,6 +163,7 @@ function Home() {
                   </Link>
                 );
               })}
+              {cat.servers.length > SHOW_SERVERS && <Link to="/servers" className="kv linkish"><span>もっと見る</span><span>{`残り ${cat.servers.length - SHOW_SERVERS} 台 ›`}</span></Link>}
             </div>
           )}
         </div>

@@ -1,22 +1,24 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { Link, createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { identifyMods, libraryCatalog, serverChanges, undoChange, installMod, installedMods, modUpdates, modVersions, removeMod, rollbackMod, searchMods, serverDetail, serverMissingDeps, setModEnabled, setModHold } from "~/lib/library-api";
+import { identifyMods, libraryCatalog, serverChanges, undoChange, installMod, installedMods, modUpdates, removeMod, rollbackMod, searchMods, serverDetail, serverMissingDeps, setModEnabled, setModHold } from "~/lib/library-api";
 import { importServerFile } from "~/lib/uploads-api";
 import { ApplyResults } from "~/lib/apply-results";
-import { ITEM_TYPES, PLATFORMS, STATE_LABELS, kindLabel, kindsOf } from "~/lib/platforms";
-import { ItemIcon } from "~/lib/type-icon";
+import { ITEM_TYPES, PLATFORMS, STATE_LABELS, kindLabel, kindsOf, supportOf } from "~/lib/platforms";
+import { SupportBadge, type VArgs, VersionChooser, type VRow } from "~/lib/version-picker";
+import { AddonIcon } from "~/lib/type-icon";
 import { listServers, powerServer } from "~/lib/servers-api";
 import { filesAccess } from "~/lib/files-api";
 import { bindServerSet, copyServer, listSets, syncServerSet, updateServers } from "~/lib/sets-api";
 import { SOURCE_LABEL, type Source, pageUrl } from "~/lib/sources";
 import { type Status, useServerStatus } from "~/lib/server-status";
 import { useCan } from "~/lib/use-can";
+import { shared } from "~/lib/shared";
 import { softwareInfo } from "~/lib/software-api";
 import { createWorldBackup, removeWorldBackup, restoreWorldBackup, setWorldBackup, worldBackups } from "~/lib/worlds-api";
 import { Console, Files } from "~/lib/server-files";
 import { COPY_LABEL, type CopyMode, DAY_NAMES, type SettingKey, SettingSheet, SettingsRows, type SoftInfo } from "~/lib/server-settings";
-import { Btn, Chip, ChipBar, Icon, Info, Menu, Row, Sheet, Tabs } from "~/lib/ui";
+import { Btn, Chip, ChipBar, Icon, Info, Menu, Row, Seg, Sheet, Tabs } from "~/lib/ui";
 
 // タブは v02 の並びと名前(「保存」= ワールドのバックアップとアドオンの変更の履歴)
 const TABS = [["overview", "概要"], ["console", "コンソール"], ["addons", "アドオン"], ["files", "ファイル"], ["backup", "保存"], ["settings", "設定"]] as const;
@@ -70,7 +72,7 @@ function ServerPage() {
   const [version, setVersion] = useState(0); // 設定を変えたら、設定のタブの要約を読み直す
 
   const reloadSoft = () => loadSoft({ data: { id: server.id } }).then(setSoft, (e) => setSoft(message(e)));
-  useEffect(() => { reloadSoft(); access().then((a) => setFiles(a.allowed), () => setFiles(false)); }, [server.id]);
+  useEffect(() => { reloadSoft(); shared("files-access", () => access(), 5000).then((a) => setFiles(a.allowed), () => setFiles(false)); }, [server.id]);
   const checkDeps = () => { if (server.profile) missingDeps({ data: { id: server.id } }).then(setDeps, () => setDeps(null)); };
   // 更新があるかは配布元に問い合わせる(開いたときと、入れたあと)
   const checkUpdates = () => check({ data: { id: server.id } }).then((u) => setUpdates(new Map(u.map((x) => [x.filename, x]))), (e) => setError(message(e)));
@@ -186,7 +188,7 @@ function Overview({ st, state, control, server, soft, onPower, onSoftware, onTab
     }
   };
   const info = typeof soft === "object" ? soft : null;
-  const todo = (a.profile && a.updates && n > 0 ? 1 : 0) + (a.deps?.missing.length ?? 0) + (info?.update ? 1 : 0) + (a.profile ? 0 : 1);
+  const todo = (a.profile && a.updates && n > 0 ? 1 : 0) + (a.deps?.missing.length ?? 0) + (a.deps?.unmet.length ?? 0) + (info?.update ? 1 : 0) + (a.profile ? 0 : 1);
   return (
     <>
       {control && <Power server={server} state={state} onPower={onPower} />}
@@ -223,9 +225,16 @@ function Overview({ st, state, control, server, soft, onPower, onSoftware, onTab
                 }); }}>{busy === "all" ? "最新にしています…" : "最新にする"}</Btn>}
               </Row>
             )}
+            {a.deps?.unmet.map((d) => (
+              <div className="row" key={`unmet:${d.name}`}>
+                <span className="badge bad">前提</span>
+                <span className="mid"><span className="ttl" translate="no">{d.name}</span><span className="sub"><span translate="no">{d.by.join("、")}</span> が使います(入っていません)</span></span>
+              </div>
+            ))}
             {a.deps?.missing.map((d) => (
               <div className="row" key={`dep:${d.source}:${d.projectId}`}>
                 <span className="badge bad">前提</span>
+                <AddonIcon type={d.projectType} url={d.iconUrl} />
                 <span className="mid"><span className="ttl" translate="no">{d.title}</span><span className="sub"><span translate="no">{d.by.join("、")}</span> が使います</span></span>
                 {a.edit && <Btn kind="tint" sm disabled={!!busy} onClick={() => act(`dep:${d.projectId}`, () => install({ data: { id: a.id, projectId: d.projectId, source: d.source } }))}>
                   {busy === `dep:${d.projectId}` ? "入れています…" : "入れる"}</Btn>}
@@ -269,10 +278,6 @@ function Addons(a: AddonProps) {
   const [busy, setBusy] = useState("");
   const [found, setFound] = useState("");
   const [err, setErr] = useState("");
-  // 行のアイコン: ライブラリにあるものは、そのアイコンを出す(無ければ種類の図)
-  const loadCat = useServerFn(libraryCatalog);
-  const [icons, setIcons] = useState<Map<string, string>>(new Map());
-  useEffect(() => { loadCat().then((c) => setIcons(new Map(c.items.filter((i) => i.iconUrl).map((i) => [`${i.source}:${i.projectId}`, i.iconUrl]))), () => {}); }, []);
   if (!a.profile) {
     return (
       <section className="group">
@@ -313,11 +318,18 @@ function Addons(a: AddonProps) {
         <Chip on={filter === "off"} onClick={() => setFilter(filter === "off" ? "" : "off")}>無効<span className="n">{off}</span></Chip>
       </ChipBar>
 
-      {a.deps && a.deps.missing.length > 0 && (
+      {a.deps && (a.deps.missing.length > 0 || a.deps.unmet.length > 0) && (
         <section className="group">
+          {a.deps.unmet.map((d) => (
+            <div className="row" key={`unmet:${d.name}`}>
+              <span className="badge bad">前提不足</span>
+              <span className="mid"><span className="ttl" translate="no">{d.name}</span><span className="sub"><span translate="no">{d.by.join("、")}</span> が使います(入っていません)</span></span>
+            </div>
+          ))}
           {a.deps.missing.map((d) => (
             <div className="row" key={`dep:${d.source}:${d.projectId}`}>
               <span className="badge bad">前提不足</span>
+              <AddonIcon type={d.projectType} url={d.iconUrl} />
               <span className="mid"><span className="ttl" translate="no">{d.title}</span><span className="sub"><span translate="no">{d.by.join("、")}</span> が使います</span></span>
               {edit && <Btn kind="tint" sm disabled={!!busy} onClick={() => run(`dep:${d.projectId}`, () => install({ data: { id, projectId: d.projectId, source: d.source } }))}>
                 {busy === `dep:${d.projectId}` ? "入れています…" : "入れる"}</Btn>}
@@ -340,16 +352,16 @@ function Addons(a: AddonProps) {
           const u = upd(m);
           return (
             <div className="row" key={m.filename}>
-              <span className="ic"><ItemIcon type={m.datapack ? "datapack" : type} url={m.projectId ? icons.get(`${m.source}:${m.projectId}`) : undefined} /></span>
+              <AddonIcon type={m.datapack ? "datapack" : type} url={m.iconUrl} />
               <span className="mid">
                 <span className="ttl">
-                  <span translate="no">{m.title ?? m.filename}</span>
+                  <span translate="no">{m.title ?? m.name ?? m.filename}</span>
                   {m.datapack && <span className="tag">データパック</span>}
                   {m.disabled && <span className="tag">無効</span>}
                   {m.held && <span className="tag">更新を止めています</span>}
                   {m.pinned && <span className="tag" title="結び付けたセットで版を固定しています">固定</span>}
                 </span>
-                <span className="sub" translate="no">{u ? <>{m.versionNumber} → <b>{u.latest}</b></> : m.title ? `${m.versionNumber} · ${m.filename}` : m.filename}</span>
+                <span className="sub" translate="no">{u ? <>{m.versionNumber} → <b>{u.latest}</b></> : m.title ? `${m.versionNumber} · ${m.filename}` : m.name ? `${m.version ? `${m.version} · ` : ""}${m.filename}` : m.filename}</span>
               </span>
               {u && edit && (
                 <Btn kind="tint" sm disabled={!!busy} onClick={() => run(m.filename, async () => {
@@ -391,7 +403,7 @@ function Addons(a: AddonProps) {
 
       {sheet === "search" && (
         <Sheet title="入れる" onClose={() => setSheet("")}>
-          <Search id={id} installed={items ?? []} datapacks={kindsOf(a.profile.platform as keyof typeof PLATFORMS).includes("datapack")} type={type}
+          <AddSheet id={id} installed={items ?? []} datapacks={kindsOf(a.profile.platform as keyof typeof PLATFORMS).includes("datapack")} type={type} mc={a.profile.mcVersion ?? ""}
             sources={a.sources.filter((s) => s !== "spigot" || type === "plugin")} onInstalled={a.onChange} />
         </Sheet>
       )}
@@ -400,72 +412,77 @@ function Addons(a: AddonProps) {
           <SetBinding id={id} edit={edit} onSynced={a.onChange} />
         </Sheet>
       )}
-      {versionsOf && <Versions id={id} item={versionsOf} onDone={() => { a.onChange(); a.onUpdates(); }} onClose={() => setVersionsOf(null)} />}
+      {versionsOf && <Versions id={id} item={versionsOf} mc={a.profile.mcVersion ?? ""} onDone={() => { a.onChange(); a.onUpdates(); }} onClose={() => setVersionsOf(null)} />}
     </>
   );
 }
 
-// 版を変える: 配布元の版から選んで入れ替える(SpigotMC はいちばん新しい版だけ)
-function Versions({ id, item, onDone, onClose }: { id: string; item: Installed; onDone: () => void; onClose: () => void }) {
-  const load = useServerFn(modVersions);
+// 版を変える: 版の一覧(このサーバーへの対応の印つき)から選んで入れ替える
+function Versions({ id, item, mc, onDone, onClose }: { id: string; item: Installed; mc: string; onDone: () => void; onClose: () => void }) {
   const install = useServerFn(installMod);
-  const [list, setList] = useState<Awaited<ReturnType<typeof modVersions>> | null>(null);
-  const [busy, setBusy] = useState("");
+  const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
-  useEffect(() => {
-    load({ data: { id, projectId: item.projectId!, source: item.source as Source, kind: item.datapack ? "datapack" : undefined } }).then(setList, (e) => setError(message(e)));
-  }, [id, item.filename]);
-  const pick = async (v: { versionId: string; versionNumber: string }) => {
-    if (!confirm(`${item.title} を ${v.versionNumber} にしますか?`)) return;
-    setBusy(v.versionId);
+  const args: VArgs = { id, projectId: item.projectId!, source: item.source as Source, kind: item.datapack ? "datapack" : undefined };
+  const pick = async (v: VRow) => {
+    setBusy(true);
     setError("");
     try {
-      await install({ data: { id, projectId: item.projectId!, source: item.source as Source, versionId: v.versionId, kind: item.datapack ? "datapack" : undefined } });
+      await install({ data: { ...args, versionId: v.versionId, unsupported: v.support === "no" } });
       setNote(`${v.versionNumber} にしました`);
       onDone();
     } catch (e) {
       setError(message(e));
     } finally {
-      setBusy("");
+      setBusy(false);
     }
   };
   return (
     <Sheet title={<span translate="no">{item.title}</span>} label={item.title ?? item.filename} onClose={onClose}>
       <p className="sub">版を変える · 今 <span translate="no">{item.versionNumber}</span></p>
-      <section className="group">
-        {!list && !error && <div className="row muted">読み込み中…</div>}
-        {list?.length === 0 && <div className="row muted">選べる版がありません(SpigotMC は、いちばん新しい版だけです)</div>}
-        {list?.map((v) => (
-          <div className="row" key={v.versionId}>
-            <span className="mid"><span className="ttl" translate="no">{v.versionNumber}</span>
-              <span className="sub">{v.date.slice(0, 10)}{v.release ? "" : " · テスト版"}</span></span>
-            {v.versionId === item.versionId ? <span className="badge ok">今</span>
-              : <Btn sm disabled={!!busy} onClick={() => pick(v)}>{busy === v.versionId ? "入れています…" : "この版にする"}</Btn>}
-          </div>
-        ))}
-      </section>
+      <VersionChooser args={args} mc={mc} current={item.versionId} label={busy ? "入れています…" : "この版にする"} busy={busy} onChoose={pick} />
       {note && <p className="muted" role="status" translate="no">{note}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </Sheet>
   );
 }
 
-function Search({ id, installed, sources, datapacks, type, onInstalled }:
-  { id: string; installed: Installed[]; sources: Source[]; datapacks: boolean; type: "plugin" | "mod"; onInstalled: () => void }) {
+// 入れるもの 1 つ(1 段目で選んだもの)
+type Chosen = { source: Source | "upload"; projectId: string; title: string; iconUrl: string; type: "plugin" | "mod" | "datapack" };
+
+// 入れる(2 段): 1 段目 = プラグイン(Mod)の一覧(配布元で探す / ライブラリ)、2 段目 = そのものの版の一覧。
+// 一覧の「対応」の印は、このサーバーの Minecraft に対応する版があるか
+function AddSheet({ id, installed, sources, datapacks, type, mc, onInstalled }:
+  { id: string; installed: Installed[]; sources: Source[]; datapacks: boolean; type: "plugin" | "mod"; mc: string; onInstalled: () => void }) {
+  const [tab, setTab] = useState<"find" | "library">("find");
+  const [chosen, setChosen] = useState<Chosen | null>(null);
+  const [done, setDone] = useState<Set<string>>(new Set());
+  const key = (src: string, projectId: string) => `${src}:${projectId}`;
+  const have = new Set([...installed.filter((m) => m.projectId).map((m) => key(m.source ?? "", m.projectId!)), ...done]);
+  if (chosen) {
+    return <PickVersion id={id} mc={mc} chosen={chosen} onBack={() => setChosen(null)}
+      onInstalled={() => { setDone((d) => new Set(d).add(key(chosen.source, chosen.projectId))); onInstalled(); }} />;
+  }
+  return (
+    <>
+      <Seg label="入れるもの" value={tab} options={[["find", "探す"], ["library", "ライブラリ"]] as const} onChange={setTab} />
+      {tab === "find"
+        ? <Find id={id} have={have} sources={sources} datapacks={datapacks} type={type} onChoose={setChosen} />
+        : <FromLibrary have={have} mc={mc} datapacks={datapacks} type={type} onChoose={setChosen} />}
+    </>
+  );
+}
+
+// 1 段目の「探す」: 配布元の検索結果(合うものを先に)
+function Find({ id, have, sources, datapacks, type, onChoose }:
+  { id: string; have: Set<string>; sources: Source[]; datapacks: boolean; type: "plugin" | "mod"; onChoose: (c: Chosen) => void }) {
   const search = useServerFn(searchMods);
-  const install = useServerFn(installMod);
   const [source, setSource] = useState<Source>("modrinth");
-  const [kind, setKind] = useState<"" | "datapack">(""); // datapack なら、ワールドのデータパックを探して入れる
+  const [kind, setKind] = useState<"" | "datapack">(""); // datapack なら、ワールドのデータパックを探す
   const shown = kind ? sources.filter((s) => s !== "spigot") : sources;
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Awaited<ReturnType<typeof searchMods>> | null>(null);
-  const [busy, setBusy] = useState("");
-  const [done, setDone] = useState<Set<string>>(new Set());
-  const [note, setNote] = useState("");
   const [error, setError] = useState("");
-  const key = (src: string, projectId: string) => `${src}:${projectId}`;
-  const have = new Set(installed.filter((m) => m.projectId).map((m) => key(m.source ?? "", m.projectId!)));
 
   const find = async (src = source, k = kind) => {
     setError("");
@@ -476,21 +493,6 @@ function Search({ id, installed, sources, datapacks, type, onInstalled }:
     }
   };
   useEffect(() => { find(); }, [id]);
-
-  const add = async (projectId: string) => {
-    setBusy(projectId);
-    setError("");
-    try {
-      const r = await install({ data: { id, projectId, source, kind: kind || undefined } });
-      setDone((d) => new Set(d).add(key(source, projectId)));
-      if (r.deps.length) setNote(`前提も入れました: ${r.deps.map((d) => (d.ok ? `${d.title} ${d.detail}` : `${d.title}(入れられません: ${d.detail})`)).join("、")}`);
-      onInstalled();
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy("");
-    }
-  };
   const pickSource = (s: Source) => { setSource(s); setHits(null); find(s); };
   const pickKind = (k: "" | "datapack") => { const s = k && source === "spigot" ? "modrinth" : source; setKind(k); setSource(s); setHits(null); find(s, k); };
 
@@ -510,21 +512,91 @@ function Search({ id, installed, sources, datapacks, type, onInstalled }:
       <section className="group">
         {!hits && !error && <div className="row muted">探しています…</div>}
         {hits?.length === 0 && <div className="row muted">見つかりませんでした。</div>}
-        {hits?.map((h) => (
-          <div className="row" key={h.projectId}>
-            <span className="ic"><ItemIcon type={kind || type} url={h.iconUrl} /></span>
-            <span className="mid">
-              <a className="ttl name" href={pageUrl(source, h.projectId, h.slug)} target="_blank" rel="noreferrer noopener" translate="no">{h.title}</a>
-              <span className="sub" translate="no">{h.summary}</span>
-              <span className="sub">{`${h.downloads.toLocaleString("ja-JP")} ダウンロード`}</span>
-            </span>
-            {have.has(key(source, h.projectId)) || done.has(key(source, h.projectId))
-              ? <span className="badge ok">入っています</span>
-              : <Btn kind="tint" sm disabled={!!busy} onClick={() => add(h.projectId)}>{busy === h.projectId ? "入れています…" : "入れる"}</Btn>}
-          </div>
-        ))}
+        {hits?.map((h) => {
+          const installed = have.has(`${source}:${h.projectId}`);
+          return (
+            <Row key={h.projectId} onClick={installed ? undefined : () => onChoose({ source, projectId: h.projectId, title: h.title, iconUrl: h.iconUrl, type: kind || type })}>
+              <AddonIcon type={kind || type} url={h.iconUrl} />
+              <span className="mid">
+                <a className="ttl name" href={pageUrl(source, h.projectId, h.slug)} target="_blank" rel="noreferrer noopener" translate="no" onClick={(e) => e.stopPropagation()}>{h.title}</a>
+                <span className="sub" translate="no">{h.summary}</span>
+                <span className="sub">{`${SOURCE_LABEL[source]} · ${h.downloads.toLocaleString("ja-JP")} ダウンロード`}</span>
+              </span>
+              {installed ? <span className="badge ok">入っています</span> : <><SupportBadge s={h.support} /><span className="chev" aria-hidden="true">›</span></>}
+            </Row>
+          );
+        })}
       </section>
-      {note && <p className="muted" role="status">{note}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
+    </>
+  );
+}
+
+// 1 段目の「ライブラリ」: チームのライブラリのもののうち、このサーバーに入れられる種類で、まだ入っていないもの
+function FromLibrary({ have, mc, datapacks, type, onChoose }: { have: Set<string>; mc: string; datapacks: boolean; type: "plugin" | "mod"; onChoose: (c: Chosen) => void }) {
+  const load = useServerFn(libraryCatalog);
+  const [items, setItems] = useState<Awaited<ReturnType<typeof libraryCatalog>>["items"] | null>(null);
+  const [query, setQuery] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => { load().then((c) => setItems(c.items), (e) => setError(message(e))); }, []);
+  const q = query.trim().toLowerCase();
+  const list = (items ?? []).filter((i) => (i.projectType === type || (datapacks && i.projectType === "datapack")) && (!q || i.title.toLowerCase().includes(q)));
+  return (
+    <>
+      <input className="input" type="search" placeholder="名前" aria-label="ライブラリから探す" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <section className="group">
+        {!items && !error && <div className="row muted">読み込んでいます…</div>}
+        {items && list.length === 0 && <div className="row muted">入れられるものがライブラリにありません</div>}
+        {list.map((i) => {
+          const installed = have.has(`${i.source}:${i.projectId}`);
+          return (
+            <Row key={i.id} onClick={installed ? undefined : () => onChoose({ source: i.source as Source | "upload", projectId: i.projectId, title: i.title, iconUrl: i.iconUrl, type: i.projectType as Chosen["type"] })}>
+              <AddonIcon type={i.projectType} url={i.iconUrl} />
+              <span className="mid">
+                <span className="ttl" translate="no">{i.title}</span>
+                <span className="sub">{[SOURCE_LABEL[i.source as Source | "upload"], i.version].filter(Boolean).join(" · ")}</span>
+              </span>
+              {installed ? <span className="badge ok">入っています</span> : <><SupportBadge s={supportOf(mc, i.mc, i.source === "spigot")} /><span className="chev" aria-hidden="true">›</span></>}
+            </Row>
+          );
+        })}
+      </section>
+      {error && <p className="error" role="alert">{error}</p>}
+    </>
+  );
+}
+
+// 2 段目: 選んだものの版の一覧。合う最新版を選んでおき、どの版でも選べる。入れたら前提も知らせる
+function PickVersion({ id, mc, chosen, onBack, onInstalled }: { id: string; mc: string; chosen: Chosen; onBack: () => void; onInstalled: () => void }) {
+  const install = useServerFn(installMod);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+  const kind = chosen.type === "datapack" ? "datapack" as const : undefined;
+  const put = async (v: VRow, auto: boolean) => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await install({ data: { id, projectId: chosen.projectId, source: chosen.source, kind, versionId: auto ? undefined : v.versionId, unsupported: v.support === "no" } });
+      setDone(true);
+      setNote(`${r.title} ${r.versionNumber} を入れました${r.deps.length ? `。前提も入れました: ${r.deps.map((d) => (d.ok ? `${d.title} ${d.detail}` : `${d.title}(入れられません: ${d.detail})`)).join("、")}` : ""}`);
+      onInstalled();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button type="button" className="pick-back" onClick={onBack}>‹ 一覧へ</button>
+      <div className="pick-head">
+        <AddonIcon type={chosen.type} url={chosen.iconUrl} size="lg" />
+        <span className="mid"><span className="ttl" translate="no">{chosen.title}</span><span className="sub">{chosen.source === "upload" ? "アップロード" : SOURCE_LABEL[chosen.source]}</span></span>
+      </div>
+      {done ? <p className="notice" role="status">{note}</p>
+        : <VersionChooser args={{ id, projectId: chosen.projectId, source: chosen.source, kind }} mc={mc} label={busy ? "入れています…" : "入れる"} busy={busy} onChoose={put} />}
       {error && <p className="error" role="alert">{error}</p>}
     </>
   );
@@ -633,7 +705,8 @@ function Changes({ id, edit, items, onChange, limit, onMore }: { id: string; edi
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  useEffect(() => { load({ data: { id } }).then(setList, (e) => setError(message(e))); }, [id, items]);
+  // 開いた直後と、アドオンの一覧が読めたあとで 2 回走るので、続けて読むときは共有する(書き込みのあとは取り直す。src/lib/shared.ts)
+  useEffect(() => { shared(`changes:${id}`, () => load({ data: { id } }), 3000).then(setList, (e) => setError(message(e))); }, [id, items]);
   const cut = limit ?? 10;
   const shown = list ? (open ? list : list.slice(0, cut)) : [];
   return (
@@ -642,6 +715,7 @@ function Changes({ id, edit, items, onChange, limit, onMore }: { id: string; edi
       {list?.length === 0 && <div className="row muted">まだありません。</div>}
       {shown.map((c) => (
         <div className={`row${c.undone ? " faded" : ""}`} key={c.id}>
+          <AddonIcon type={c.type} url={c.iconUrl} />
           <span className="mid">
             <span className="ttl"><span translate="no">{c.title}</span>{` を${({ 外す: "外した", 更新: "更新した", 無効にする: "無効にした", 有効にする: "有効にした" } as Record<string, string>)[c.action] ?? "入れた"}`}{c.config && <span className="tag">設定も退避</span>}</span>
             <span className="sub" translate="no">{new Date(c.at).toLocaleString("ja-JP")}{c.by ? ` · ${c.by}` : ""}{c.action === "更新" && c.version ? ` · 前の版 ${c.version}` : ""}{c.undone ? " · 元に戻しました" : ""}</span>

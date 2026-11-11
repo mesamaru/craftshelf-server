@@ -1,6 +1,32 @@
 // 英語表示: 辞書・数字と組み合わさる文・1 文字の語(曜日)
-import { describe, expect, it } from "vitest";
-import { translate } from "~/lib/i18n";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { loadEnglish, translate } from "~/lib/i18n";
+
+// 辞書は英語のときだけ読み込む(translate は、読み込んだあとに使う)
+beforeAll(() => loadEnglish());
+
+describe("英語の辞書は英語のときだけ読み込む(日本語の画面の入口 JS に入れない)", () => {
+  it("辞書(i18n-en)を静的に import するのは、型だけ。実体は import() で読み込む", () => {
+    const files: string[] = [];
+    const walk = (d: string) => { for (const f of readdirSync(d)) { const p = join(d, f); if (statSync(p).isDirectory()) walk(p); else if (/\.(ts|tsx)$/.test(f)) files.push(p); } };
+    walk("src");
+    const users = files.filter((f) => /from\s+["'][^"']*i18n-en["']/.test(readFileSync(f, "utf8")));
+    expect(users).toEqual([]);
+    expect(readFileSync("src/lib/i18n.ts", "utf8")).toContain('import("./i18n-en")');
+  });
+
+  it("読み込む前の translate は訳さない。loadEnglish のあとで訳す(読み込みは 1 回だけ)", async () => {
+    vi.resetModules();
+    const fresh = await import("~/lib/i18n");
+    expect(fresh.translate("保存")).toBe("保存");
+    const a = fresh.loadEnglish();
+    expect(fresh.loadEnglish()).toBe(a);
+    await a;
+    expect(fresh.translate("保存")).toBe("Save");
+  });
+});
 
 describe("英語表示", () => {
   it("辞書・数字の文・記号を置き換え、日本語の無いものはそのまま", () => {
@@ -25,6 +51,15 @@ describe("英語表示", () => {
     expect(translate("新しいパスワード(10 文字以上)")).toBe("New password (10+ characters)");
     expect(translate("匿名の利用状況を送る(1 日 1 回)")).toBe("Send anonymous usage (once a day)");
     expect(translate("この版は、このサーバーの種類・バージョンに合いません")).toBe("This version does not fit this server's type and version");
+    // サーバーに入れるときの版の選び方(03.73.00)
+    expect(translate("サーバー 1.20.4 に合う 5.3.2 を入れます(最新は 5.4.1)")).toBe("Installing 5.3.2, the newest that fits server 1.20.4 (latest is 5.4.1)");
+    expect(translate("5.4.1 はサーバー 1.20.4 に対応していません(合う最新版は 5.3.2)")).toBe("5.4.1 is not compatible with server 1.20.4 (best match is 5.3.2)");
+    expect(translate("5.4.1 は、このサーバー(Minecraft 1.20.4)に対応していません。入れると動かないおそれがあります。それでも入れますか?")).toMatch(/^5\.4\.1 is not compatible with this server \(Minecraft 1\.20\.4\)/);
+    expect(translate("このサーバーの種類・バージョン(1.20.4)に合う版がありません(対応する最新の Minecraft は 1.21 です)")).toMatch(/^No version fits this server's type and version \(1\.20\.4\) \(the newest Minecraft supported is 1\.21\)/);
+    expect([translate("対応"), translate("対応不明"), translate("非対応"), translate("合う最新版")]).toEqual(["Compatible", "Unknown", "Incompatible", "Best match"]);
+    expect(translate("MC 1.20.4〜1.20.6 · 2026-02-01 · Modrinth・保存済み")).toBe("MC 1.20.4–1.20.6 · 2026-02-01 · Modrinth · saved");
+    expect(translate("MC 1.8.9〜1.21.4(1.20.4 は未対応) · 2024-10-26 · Modrinth")).toBe("MC 1.8.9–1.21.4 (not 1.20.4) · 2024-10-26 · Modrinth");
+    expect([translate("サーバー 1.20.4 に合う最新版"), translate("選んだ版")]).toEqual(["Best match for server 1.20.4", "Chosen version"]);
     expect(translate("2 個")).toBe("2 items"); // パスキーの数など
     expect(translate("1 個")).toBe("1 item");
     expect(translate("自動")).toBe("Auto");

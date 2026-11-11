@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { Link, Outlet, createFileRoute, redirect, useParams, useRouter } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  addConnection, addLocalServer, addServers, browseHost, listConnections, listServers, localEnabled, remoteServers, removeConnection, serverStatus,
+  addConnection, addLocalServer, addServers, browseHost, listConnections, listServers, remoteServers, sharedLocalEnabled, sharedServers, removeConnection, serverStatus,
 } from "~/lib/servers-api";
-import { useCan } from "~/lib/use-can";
+import { useCan, useTeamKey } from "~/lib/use-can";
+import { shared } from "~/lib/shared";
 import { ApplyResults } from "~/lib/apply-results";
 import { updateServers } from "~/lib/sets-api";
 import { outdatedLibraryServers } from "~/lib/library-api";
@@ -12,7 +13,8 @@ import { filesAccess } from "~/lib/files-api";
 import { addAgentServer, createAgent, listAgents, removeAgent } from "~/lib/agents-api";
 import { STATE_LABELS, kindLabel } from "~/lib/platforms";
 import { type Status, ServerStatusCtx } from "~/lib/server-status";
-import { Btn, Icon, type IconName, Info, Seg, Sheet } from "~/lib/ui";
+import { Btn, Chip, ChipBar, Icon, type IconName, Info, Seg, Sheet } from "~/lib/ui";
+import { SERVER_FILTERS, SERVER_SORTS, type ServerFilter, type ServerItem, type ServerSort, arrange, isServerSort } from "~/lib/server-list";
 import { MobileSearch, StoragePill } from "~/lib/shell";
 
 export const Route = createFileRoute("/servers")({
@@ -20,7 +22,7 @@ export const Route = createFileRoute("/servers")({
     if (!context.user) throw redirect({ to: "/login", search: { next: "/servers" } });
     return { user: context.user };
   },
-  loader: async () => ({ servers: await listServers(), connections: await listConnections(), local: await localEnabled() }),
+  loader: async () => ({ servers: await sharedServers(), connections: await listConnections(), local: await sharedLocalEnabled() }),
   component: Servers,
 });
 
@@ -28,6 +30,8 @@ const message = (e: unknown) => (e instanceof Error ? e.message : "うまくい�
 
 type Server = Awaited<ReturnType<typeof listServers>>[number];
 // 更新の確かめは配布元に問い合わせるので、開くたびにはしない(10 分は前の結果を使う。「更新」の数を押すと、いつでも確かめ直す)
+const SORT_KEY = "craftshelf.servers.sort";
+const GROUP_KEY = "craftshelf.servers.group";
 const OLD_TTL = 10 * 60_000;
 let lastOld: { team: string; at: number; map: Map<string, number> } | null = null;
 
@@ -37,7 +41,8 @@ let lastOld: { team: string; at: number; map: Map<string, number> } | null = nul
 function Servers() {
   const { user } = Route.useRouteContext();
   const { servers, connections, local } = Route.useLoaderData();
-  const { can, team } = useCan(user.id);
+  const { can } = useCan(user.id);
+  const teamKey = useTeamKey(); // 選んでいるチームが分かる(null = まだ)まで、チームごとの読み込みはしない
   const id = (useParams({ strict: false }) as { id?: string }).id;
   const router = useRouter();
   const reload = () => router.invalidate();
@@ -47,42 +52,63 @@ function Servers() {
   const outdated = useServerFn(outdatedLibraryServers);
   const access = useServerFn(filesAccess);
   const [st, setSt] = useState<Record<string, Status | string>>({}); // 文字はつながらなかった理由
-  const [old, setOld] = useState<Map<string, number> | null>(() => (lastOld && lastOld.team === team?.id && Date.now() - lastOld.at < OLD_TTL ? lastOld.map : null)); // サーバー → 古い版の数
+  const [old, setOld] = useState<Map<string, number> | null>(() => (lastOld && lastOld.team === teamKey && Date.now() - lastOld.at < OLD_TTL ? lastOld.map : null)); // サーバー → 古い版の数
   const [checking, setChecking] = useState(false);
   const [files, setFiles] = useState(false);
   const [sheet, setSheet] = useState<"" | "add" | "update">("");
   const [error, setError] = useState("");
 
-  const read = (sid: string) => status({ data: { id: sid } }).then((x) => setSt((p) => ({ ...p, [sid]: x })), (e) => setSt((p) => ({ ...p, [sid]: message(e) })));
+  // 状態の読み込みはメニューの点(shell.tsx)と共有する(10 秒以内に読んだものがあれば、それを使う)
+  const read = (sid: string) => shared(`status:${sid}`, () => status({ data: { id: sid } }), 10_000).then((x) => setSt((p) => ({ ...p, [sid]: x })), (e) => setSt((p) => ({ ...p, [sid]: message(e) })));
   useEffect(() => {
     const all = () => { for (const s of servers) read(s.id); };
     all();
     const t = setInterval(() => { if (!document.hidden) all(); }, 15_000);
     return () => clearInterval(t);
   }, [servers]);
-  useEffect(() => { access().then((a) => setFiles(a.allowed), () => setFiles(false)); }, [team?.id]);
+  useEffect(() => { if (teamKey !== null) shared("files-access", () => access(), 5000).then((a) => setFiles(a.allowed), () => setFiles(false)); }, [teamKey]);
   // 「更新あり」は配布元に問い合わせる。開いたとき(前の結果が新しければそれを使う)と、「更新」の数を押したときに確かめる
-  const checkOld = () => {
+  const checkOld = (fresh = false) => {
     setChecking(true);
     setError("");
-    outdated().then((r) => {
+    outdated({ data: { fresh } }).then((r) => {
       const n = new Map<string, number>();
       for (const x of r) for (const sid of x.serverIds) n.set(sid, (n.get(sid) ?? 0) + 1);
-      lastOld = { team: team?.id ?? "", at: Date.now(), map: n };
+      lastOld = { team: teamKey ?? "", at: Date.now(), map: n };
       setOld(n);
     }, (e) => setError(message(e))).finally(() => setChecking(false));
   };
-  useEffect(() => { if (servers.length && !old) checkOld(); }, [team?.id, servers.length]);
+  useEffect(() => { if (teamKey !== null && servers.length && !old) checkOld(); }, [teamKey, servers.length]); // チームが分かってから 1 回だけ
 
   const stateOf = (sid: string) => { const x = st[sid]; return typeof x === "object" ? x.state : ""; };
   const running = servers.filter((s) => stateOf(s.id) === "running").length;
   const players = servers.reduce((n, s) => { const x = st[s.id]; return n + (typeof x === "object" ? x.ping?.online ?? 0 : 0); }, 0);
   const updates = old ? servers.reduce((n, s) => n + (old.get(s.id) ?? 0), 0) : null;
   const behind = servers.filter((s) => old?.get(s.id));
-  const need = behind;
-  const ok = servers.filter((s) => !old?.get(s.id));
-  const ordered = [...need, ...ok];
-  const group = (title: string, list: Server[]) => list.length > 0 && (
+  // 並べ替え・グループ分けはこの端末に覚える(読み込むまで、いちばん上のサーバーは決めない)
+  const [pref, setPref] = useState<{ sort: ServerSort; group: boolean }>({ sort: "name", group: true });
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    try {
+      const sort = localStorage.getItem(SORT_KEY);
+      setPref({ sort: isServerSort(sort) ? sort : "name", group: localStorage.getItem(GROUP_KEY) !== "0" });
+    } catch {}
+    setLoaded(true);
+  }, []);
+  const save = (p: Partial<typeof pref>) => {
+    setPref((x) => ({ ...x, ...p }));
+    try { if (p.sort) localStorage.setItem(SORT_KEY, p.sort); if (p.group !== undefined) localStorage.setItem(GROUP_KEY, p.group ? "1" : "0"); } catch {}
+  };
+  const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<ServerFilter>("all");
+  const many = servers.length > 4; // 少ないときは絞り込みを出さない(並べ替えだけ)
+  const items = servers.map((s, index) => {
+    const x = st[s.id];
+    return { ...s, index, state: stateOf(s.id), old: old?.get(s.id) ?? 0, online: typeof x === "object" ? x.ping?.online ?? 0 : 0 };
+  });
+  const { need, ok, first } = arrange(items, { sort: pref.sort, q: many ? q : "", filter: many ? filter : "all", group: pref.group });
+  const nothing = servers.length > 0 && need.length + ok.length === 0;
+  const group = (title: string, list: (Server & ServerItem)[]) => list.length > 0 && (
     <div key={title || "all"}>
       {title && <div className="sgrp">{title}</div>}
       <section className="group slist">{list.map((s) => <ServerRow key={s.id} server={s} st={st[s.id]} old={old?.get(s.id) ?? 0} checked={!!old} on={s.id === id} />)}</section>
@@ -91,7 +117,7 @@ function Servers() {
   const link = (to: string, icon: IconName, label: string) => <Link to={to as "/"} className="btn tint sm"><Icon name={icon} />{label}</Link>;
 
   return (
-    <ServerStatusCtx.Provider value={{ st, refresh: (sid) => setTimeout(() => read(sid), 1500), first: ordered[0]?.id ?? null, old }}>
+    <ServerStatusCtx.Provider value={{ st, refresh: (sid) => setTimeout(() => read(sid), 1500), first: loaded ? first : null, old }}>
       <main className={`page fill srv${id ? " has-id" : ""}`}>
         <header className="bar">
           <h1>サーバー
@@ -117,12 +143,27 @@ function Servers() {
           <aside className="srv-side" aria-label="サーバーの一覧">
             <div className="sstats">
               <div className="glass"><small>稼働</small><b>{running}<i>{`/${servers.length}`}</i></b></div>
-              <button type="button" className={`glass${updates ? " warn" : ""}`} disabled={checking} onClick={checkOld} title="押すと、配布元に問い合わせて確かめ直します">
+              <button type="button" className={`glass${updates ? " warn" : ""}`} disabled={checking} onClick={() => checkOld(true)} title="押すと、配布元に問い合わせて確かめ直します">
                 <small>更新</small><b>{checking && updates === null ? "…" : updates ?? "—"}</b>
               </button>
               <div className="glass"><small>人数</small><b>{players}</b></div>
             </div>
             {servers.length === 0 && <section className="group"><div className="row muted">まだサーバーがありません。</div></section>}
+            {servers.length > 0 && (
+              <div className="sfilter">
+                {many && <label className="q"><Icon name="search" /><input type="search" placeholder="検索" aria-label="名前で絞り込む" value={q} onChange={(e) => setQ(e.target.value)} /></label>}
+                <select className="sel" value={pref.sort} aria-label="並べ替え" onChange={(e) => save({ sort: e.target.value as ServerSort })}>
+                  {SERVER_SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+            )}
+            {many && (
+              <ChipBar label="絞り込み">
+                {SERVER_FILTERS.map(([v, l]) => <Chip key={v} on={filter === v} warn={v === "update"} onClick={() => setFilter(v)}>{l}</Chip>)}
+                {behind.length > 0 && <Chip on={pref.group} onClick={() => save({ group: !pref.group })}>グループ分け</Chip>}
+              </ChipBar>
+            )}
+            {nothing && <section className="group"><div className="row muted">条件に合うサーバーはありません</div></section>}
             {group(need.length ? "対応が必要" : "", need)}
             {group(need.length ? "問題なし" : "", ok)}
             {edit && servers.length > 0 && (

@@ -2,7 +2,10 @@
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
+import { backupService } from "~/server/backup";
+import { storageTarget, worldBackup } from "~/server/db/schema";
 import { HttpError } from "~/server/guard";
 import { libraryService } from "~/server/library";
 import type { FetchLike } from "~/server/net";
@@ -158,6 +161,57 @@ describe("保存先", () => {
     const f40 = (await up.files(owner, item.id))[0];
     expect((await bytesOf(up.download(owner, f40.id))).toString("latin1")).toContain("class 4.0");
     expect(JSON.stringify(await up.targets(owner))).not.toContain("\"pw\""); // パスワードの値そのもの(一時フォルダの名前にたまたま pw が入ることがある)
+  });
+
+  it("パネル・ワールドのバックアップの置き場所に使っている保存先は消せない(消すとバックアップが見えなくなる)", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "cs-up-bk-"));
+    await up.addTarget(owner, { name: "バックアップ先", kind: "local", path: folder });
+    const bk = (await up.targets(owner)).targets.find((x) => x.name === "バックアップ先")!;
+    const backups = backupService({ db: t.db, auth: t.auth, secret: SECRET, fetch: fake, local: { dataDir } });
+    await backups.setSchedule(owner, { enabled: false, time: "04:00", keep: 5, targetId: bk.id, tz: "Asia/Tokyo" });
+    await expect(up.removeTarget(owner, bk.id)).rejects.toThrow("パネルのバックアップの置き場所");
+    await backups.setSchedule(owner, { enabled: false, time: "04:00", keep: 5, targetId: null, tz: "Asia/Tokyo" });
+    await t.db.insert(worldBackup).values({ serverId: id, targetId: bk.id });
+    await expect(up.removeTarget(owner, bk.id)).rejects.toThrow("ワールドのバックアップの置き場所");
+    await t.db.delete(worldBackup).where(eq(worldBackup.serverId, id));
+    await up.removeTarget(owner, bk.id);
+    expect((await up.targets(owner)).targets.some((x) => x.name === "バックアップ先")).toBe(false);
+  });
+
+  it("v02 から取り込んだ保存先のファイルは、v03 で消しても保存先には残る(v02 も同じ場所を使うので、記録だけ消す)", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "cs-up-v02-"));
+    await up.addTarget(owner, { name: "v02: パネルの中", kind: "local", path: folder });
+    const tg = (await up.targets(owner)).targets.find((x) => x.name === "v02: パネルの中")!;
+    await t.db.update(storageTarget).set({ v02: true }).where(eq(storageTarget.id, tg.id));
+    const put = async (name: string) => {
+      const r = await up.ingest(owner, `${name}.jar`, makeZip({ "plugin.yml": `name: ${name}
+version: 1.0
+main: a.B
+`, "a/B.class": name }, false), { targetId: tg.id });
+      const item = (await lib.catalog(owner)).items.find((i) => i.title === r.title)!;
+      return { item, file: (await up.files(owner, item.id))[0] };
+    };
+    const filesIn = (root: string, name: string) => (existsSync(join(root, "plugin", name)) ? readdirSync(join(root, "plugin", name)).length : 0);
+    const onDisk = (name: string) => filesIn(folder, name) > 0;
+    // 版を消す
+    const a = await put("V02Keep");
+    expect(onDisk("V02Keep")).toBe(true);
+    await up.removeFile(owner, a.file.id);
+    expect((await up.files(owner, a.item.id)).length).toBe(0); // 記録は消える
+    expect(onDisk("V02Keep")).toBe(true); // 保存先のファイルは v02 のものでもあるので残る
+    // ほかの保存先へ移すときは、写すだけ(元は消さない)
+    const b = await put("V02Move");
+    const dest = mkdtempSync(join(tmpdir(), "cs-up-v02to-"));
+    await up.addTarget(owner, { name: "移し先", kind: "local", path: dest });
+    const to = (await up.targets(owner)).targets.find((x) => x.name === "移し先")!;
+    const moved = await up.moveFiles(owner, tg.id, to.id);
+    expect(moved.failed).toEqual([]);
+    expect(filesIn(dest, "V02Move")).toBe(1);
+    expect(onDisk("V02Move")).toBe(true);
+    expect((await up.files(owner, b.item.id))[0].id).toBe(b.file.id);
+    // v02 のものでない保存先は、いつもどおり消える
+    await up.removeFile(owner, b.file.id);
+    expect(filesIn(dest, "V02Move")).toBe(0);
   });
 
   it("WebDAV の URL にユーザー名を書いたものは断る", () => {

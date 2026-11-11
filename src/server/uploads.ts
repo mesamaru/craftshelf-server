@@ -8,7 +8,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import { and, desc, eq, isNotNull, isNull, ne } from "drizzle-orm";
 import { PLATFORMS, type Platform, isPlatform } from "~/lib/platforms";
-import { addonSetItem, libraryFile, libraryItem, storageTarget, installedMod, server, serverProfile, teamOption } from "./db/schema";
+import { addonSetItem, backupSchedule, libraryFile, libraryItem, storageTarget, installedMod, server, serverProfile, teamOption, worldBackup } from "./db/schema";
 import { CF_HOSTS } from "./curseforge";
 import { eventService } from "./events";
 import { HttpError, isHttpError, requireTeam } from "./guard";
@@ -114,16 +114,17 @@ export function fileStore(deps: Deps) {
     return (await db.select().from(libraryFile).where(and(eq(libraryFile.itemId, i.id), eq(libraryFile.upstreamVersionId, versionId))))[0] ?? null;
   }
 
-  /** 保存した版のうち、このサーバーの種類に合ういちばん新しいもの(配布元につながらない・版が消えたときに使う) */
-  async function savedPick(teamId: string, source: string, projectId: string, platform: Platform, kind?: "datapack") {
+  /** 保存した版(配布元のもの)のうち、このサーバーの種類に合うもの(新しい順。配布元につながらない・版が消えたときにも入れられるように) */
+  async function savedAll(teamId: string, source: string, projectId: string, platform: Platform, kind?: "datapack") {
     const i = await itemBy(teamId, source, projectId);
-    if (!i) return null;
+    if (!i) return [];
     const want: readonly string[] = kind ? [] : PLATFORMS[platform].loaders;
-    const ext = kind ? /\.zip$/i : /\.jar$/i;
+    const ext = kind ? /.zip$/i : /.jar$/i;
     const rows = await db.select().from(libraryFile).where(and(eq(libraryFile.itemId, i.id), ne(libraryFile.upstreamVersionId, ""))).orderBy(desc(libraryFile.createdAt));
-    const fit = rows.filter((f) => ext.test(f.filename)).map((f) => ({ row: f, loaders: JSON.parse(f.loaders) as string[], date_published: f.createdAt.toISOString() }))
-      .filter((f) => !want.length || !f.loaders.length || f.loaders.some((l) => want.includes(l)));
-    return pickVersion(fit, want)?.row ?? null;
+    return rows.filter((f) => ext.test(f.filename)).filter((f) => {
+      const loaders = JSON.parse(f.loaders) as string[];
+      return !want.length || !loaders.length || loaders.some((l) => want.includes(l)); // 調べられなかったものは、種類が合えば使う
+    });
   }
 
   /**
@@ -182,10 +183,22 @@ export function fileStore(deps: Deps) {
     return new Set([...used.map((r) => r.v), ...pinned.map((r) => r.v!)]);
   }
 
+  /**
+   * 保存先のファイルを消す。v02 から取り込んだ保存先(v02 と同じ場所を指す)のファイルは、保存先には触らない
+   * (コピーせずに指しているだけなので、消すと v02 のライブラリからも無くなる。記録だけ消す)
+   */
+  async function removeStored(teamId: string, f: FileRow) {
+    if (f.targetId) {
+      const [t] = await db.select({ v02: storageTarget.v02 }).from(storageTarget).where(and(eq(storageTarget.id, f.targetId), eq(storageTarget.teamId, teamId)));
+      if (t?.v02) return;
+    }
+    await (await storeOf(teamId, f.targetId)).remove(f.storageKey);
+  }
+
   /** 版を消す(保存先のファイルも。保存先につながらなくても記録は消す) */
   async function dropFile(teamId: string, f: FileRow) {
     try {
-      await (await storeOf(teamId, f.targetId)).remove(f.storageKey);
+      await removeStored(teamId, f);
     } catch { /* ファイルは保存先に残る(保存先の中身の一覧に「記録の無いもの」として出る) */ }
     await db.delete(libraryFile).where(eq(libraryFile.id, f.id));
   }
@@ -211,7 +224,7 @@ export function fileStore(deps: Deps) {
     return removed;
   }
 
-  return { storeOf, pick, choices, read, stream, withTemp, tempPath, configOf, defaultConfig, activeOf, optionOf, keepOf, savedOf, savedPick, saveUpstream, keepSaved, prune, keptVersions, dropFile };
+  return { storeOf, pick, choices, read, stream, withTemp, tempPath, configOf, defaultConfig, activeOf, optionOf, keepOf, savedOf, savedAll, saveUpstream, keepSaved, prune, keptVersions, dropFile, removeStored };
 }
 
 export async function sha256Of(path: string) {
@@ -265,7 +278,7 @@ export async function downloadTo(fetch: Deps["fetch"], url: string, path: string
 
 export function uploadService(deps: Deps) {
   const { db, auth, secret } = deps;
-  const { storeOf, stream, tempPath, configOf, activeOf, prune } = fileStore(deps);
+  const { storeOf, stream, tempPath, configOf, activeOf, prune, removeStored } = fileStore(deps);
   const { record } = eventService(deps);
   const needLocal = () => {
     if (!deps.local) throw new HttpError(400, "アップロードしたアドオンは、自分用の版だけで使えます");
@@ -352,6 +365,8 @@ export function uploadService(deps: Deps) {
         .where(and(eq(libraryItem.teamId, teamId), from ? eq(libraryFile.targetId, from) : isNull(libraryFile.targetId)));
       const src = await storeOf(teamId, from);
       const dst = await storeOf(teamId, to);
+      // v02 から取り込んだ保存先からは、写すだけ(元は v02 も使っているので消さない)
+      const keepSrc = !!from && !!(await db.select({ id: storageTarget.id }).from(storageTarget).where(and(eq(storageTarget.id, from), eq(storageTarget.v02, true)))).length;
       let moved = 0;
       const failed: { filename: string; message: string }[] = [];
       for (const { f } of rows) {
@@ -361,7 +376,7 @@ export function uploadService(deps: Deps) {
           const back = await dst.get(f.storageKey);
           if (createHash("sha256").update(back).digest("hex") !== f.sha256) throw new StorageError("移した先の中身が元と違います");
           await db.update(libraryFile).set({ targetId: to }).where(eq(libraryFile.id, f.id));
-          await src.remove(f.storageKey).catch(() => {}); // 元が消せなくても、移した先は使える
+          if (!keepSrc) await src.remove(f.storageKey).catch(() => {}); // 元が消せなくても、移した先は使える
           moved++;
         } catch (e) {
           failed.push({ filename: f.filename, message: e instanceof Error ? e.message : "移せませんでした" });
@@ -378,6 +393,12 @@ export function uploadService(deps: Deps) {
       if (!t) throw new HttpError(404, "保存先が見つかりません");
       const used = await db.select({ id: libraryFile.id }).from(libraryFile).where(eq(libraryFile.targetId, id)).limit(1);
       if (used.length) throw new HttpError(400, "この保存先にはファイルが残っているので消せません");
+      // バックアップの置き場所に選んでいる保存先を消すと、置いたバックアップが一覧から見えなくなる(消すと、置き場所が「パネルの中」に戻るため)
+      const [bk] = await db.select({ id: backupSchedule.teamId }).from(backupSchedule).where(and(eq(backupSchedule.teamId, teamId), eq(backupSchedule.targetId, id)));
+      if (bk) throw new HttpError(400, "パネルのバックアップの置き場所に使っているので消せません(先に置き場所を変えてください)");
+      const [wb] = await db.select({ id: worldBackup.serverId }).from(worldBackup).innerJoin(server, eq(worldBackup.serverId, server.id))
+        .where(and(eq(server.teamId, teamId), eq(worldBackup.targetId, id))).limit(1);
+      if (wb) throw new HttpError(400, "ワールドのバックアップの置き場所に使っているので消せません(先に置き場所を変えてください)");
       await db.delete(storageTarget).where(eq(storageTarget.id, id));
       await record({ teamId, userId: user.id, kind: "admin", action: "保存先を消す", target: t.name });
     },
@@ -510,7 +531,7 @@ export function uploadService(deps: Deps) {
       const [r] = await db.select({ f: libraryFile, title: libraryItem.title }).from(libraryFile).innerJoin(libraryItem, eq(libraryFile.itemId, libraryItem.id))
         .where(and(eq(libraryFile.id, fileId), eq(libraryItem.teamId, teamId)));
       if (!r) throw new HttpError(404, "見つかりません");
-      await fromStorage(async () => (await storeOf(teamId, r.f.targetId)).remove(r.f.storageKey));
+      await fromStorage(() => removeStored(teamId, r.f));
       await db.delete(libraryFile).where(eq(libraryFile.id, fileId));
       await record({ teamId, userId: user.id, kind: "changes", action: "アップロードした版を消す", target: r.title, detail: r.f.filename });
     },
