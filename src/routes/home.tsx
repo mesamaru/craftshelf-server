@@ -12,12 +12,15 @@ import { MobileSearch, StoragePill } from "~/lib/shell";
 import { AddonIcon } from "~/lib/type-icon";
 import { Btn, Chip, Icon, type IconName, fmtSize } from "~/lib/ui";
 import { useCan, useTeamKey } from "~/lib/use-can";
+import { pageTitle } from "~/lib/titles";
+import { confirmDialog } from "~/lib/dialog-queue";
 
 export const Route = createFileRoute("/home")({
   beforeLoad: ({ context }) => {
     if (!context.user) throw redirect({ to: "/login", search: { next: "/home" } });
     return { user: context.user };
   },
+  head: () => ({ meta: [{ title: pageTitle("ホーム") }] }),
   component: Home,
 });
 
@@ -157,7 +160,7 @@ function Home() {
                 return (
                   <Link key={s.id} to="/servers/$id" params={{ id: s.id }} className="row click">
                     <span className="ic"><span className="icon-ph t-server"><Icon name="servers" /></span></span>
-                    <span className="mid"><span className="ttl" translate="no">{s.name}</span><span className="sub">{`${n} 件を管理中`}</span></span>
+                    <span className="mid"><span className="ttl" translate="no">{s.name}</span><span className="sub">{`ライブラリ管理 ${n} 件`}</span></span>
                     {behind !== null && (behind ? <span className="badge upd">{`未同期 ${behind}`}</span> : <span className="badge ok">同期済み</span>)}
                     <span className="chev" aria-hidden="true">›</span>
                   </Link>
@@ -199,8 +202,8 @@ function Home() {
     put({ ...layout, order });
   };
   const toggle = (list: "hidden" | "full", k: string) => put({ ...layout, [list]: layout[list].includes(k) ? layout[list].filter((x) => x !== k) : [...layout[list], k] });
-  const remove = (k: string) => {
-    if (!confirm(`「${nameOf(k)}」を消しますか?`)) return;
+  const remove = async (k: string) => {
+    if (!(await confirmDialog({ message: `「${nameOf(k)}」を消しますか?`, ok: "消す", danger: true }))) return;
     put({ ...layout, custom: layout.custom.filter((c) => c.id !== k), order: layout.order.filter((x) => x !== k) });
   };
   const add = (type: CustomType) => {
@@ -223,8 +226,8 @@ function Home() {
             <span className="whandle" title="ドラッグで並べ替え" aria-hidden="true"><Icon name="grip" /></span>
             <span className="wname" translate={layout.custom.find((c) => c.id === k)?.title ? "no" : undefined}>{nameOf(k)}</span>
             <span className="grow" />
-            <button type="button" className="rbtn sm" aria-label="前へ" title="前へ" disabled={i === 0} onClick={() => move(k, i - 1)}><Icon name="up" /></button>
-            <button type="button" className="rbtn sm" aria-label="後ろへ" title="後ろへ" disabled={i === layout.order.length - 1} onClick={() => move(k, i + 1)}><Icon name="down" /></button>
+            <button type="button" className="rbtn sm" aria-label="前へ" title="前へ" onClick={() => move(k, i - 1)}><Icon name="up" /></button>
+            <button type="button" className="rbtn sm" aria-label="後ろへ" title="後ろへ" onClick={() => move(k, i + 1)}><Icon name="down" /></button>
             <button type="button" className="rbtn sm" aria-pressed={layout.full.includes(k)} aria-label={layout.full.includes(k) ? "半分の幅にする" : "全幅にする"} title={layout.full.includes(k) ? "半分の幅にする" : "全幅にする"} onClick={() => toggle("full", k)}><Icon name={layout.full.includes(k) ? "shrink" : "expand"} /></button>
             <button type="button" className="rbtn sm" aria-pressed={off} aria-label={off ? "表示する" : "非表示にする"} title={off ? "表示する" : "非表示にする"} onClick={() => toggle("hidden", k)}><Icon name={off ? "eyeoff" : "eye"} /></button>
             {layout.custom.some((c) => c.id === k) && <button type="button" className="rbtn sm red" aria-label="消す" title="消す" onClick={() => remove(k)}><Icon name="trash" /></button>}

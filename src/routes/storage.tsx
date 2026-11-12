@@ -1,22 +1,24 @@
 import { useEffect, useState } from "react";
 import { Link, createFileRoute, redirect } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { Info } from "~/lib/ui";
+import { Btn, Info, fmtSize } from "~/lib/ui";
 import { SettingsFrame } from "~/lib/settings-frame";
 import { activateStorageTarget, addStorageTarget, moveStorageFiles, removeStorageTarget, storageTargets } from "~/lib/uploads-api";
 import { savedOptions, scanStorage, setSavedOptions, storageContents, storageStatus } from "~/lib/saved-api";
+import { settingsTitle } from "~/lib/titles";
+import { confirmDialog } from "~/lib/dialog-queue";
 
 export const Route = createFileRoute("/storage")({
   beforeLoad: ({ context }) => {
     if (!context.user) throw redirect({ to: "/login", search: { next: "/storage" } });
     return { user: context.user };
   },
+  head: () => ({ meta: [{ title: settingsTitle("storage") }] }),
   component: Storage,
 });
 
 const message = (e: unknown) => (e instanceof Error ? e.message : "うまくいきませんでした");
 const KIND_LABEL: Record<string, string> = { local: "フォルダ", webdav: "WebDAV", smb: "SMB" };
-const size = (n: number) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 // アップロードしたアドオンの保存先(自分用の版・管理者以上)
 function Storage() {
@@ -67,7 +69,7 @@ function Storage() {
               : <button className="trail link" type="button" disabled={!!busy} onClick={() => run(t.id, () => activate({ data: { id: t.id } }))}>これを使う</button>}
             <button className="link" type="button" aria-expanded={open === t.id} onClick={() => setOpen(open === t.id ? null : t.id)}>{open === t.id ? "閉じる" : "状況と中身"}</button>
             <button className="link danger" type="button" disabled={!!busy}
-              onClick={() => confirm(`保存先「${t.name}」を消しますか?(ファイルが残っていると消せません)`) && run(`rm:${t.id}`, () => remove({ data: { id: t.id } }))}>消す</button>
+              onClick={async () => (await confirmDialog({ message: `保存先「${t.name}」を消しますか?(ファイルが残っていると消せません)`, ok: "消す", danger: true })) && run(`rm:${t.id}`, () => remove({ data: { id: t.id } }))}>消す</button>
           </div>
         ))}
         {data && open && <div className="row column"><TargetDetail id={open} /></div>}
@@ -113,7 +115,7 @@ function NewTarget({ onDone }: { onDone: () => void }) {
             <option value="webdav">WebDAV</option>
           </select>
         </div>
-        <input className="row" placeholder="名前(例 家の NAS)" translate="no" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+        <input className="row" placeholder="名前(例 家の NAS)" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
         {kind === "local" && <input className="row codes" placeholder="フォルダの場所(例 /mnt/nas/craftshelf)" value={f.path} onChange={(e) => setF({ ...f, path: e.target.value })} aria-label="フォルダの場所" />}
         {kind === "smb" && (
           <>
@@ -149,7 +151,7 @@ function MoveFiles({ targets, onDone }: { targets: { id: string; name: string }[
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const submit = async () => {
-    if (!confirm("ファイルを移しますか?(数が多いと時間がかかります)")) return;
+    if (!(await confirmDialog({ message: "ファイルを移しますか?(数が多いと時間がかかります)", ok: "移す" }))) return;
     setBusy(true);
     setError("");
     setNote("");
@@ -226,7 +228,7 @@ function SavedOptions() {
               <input className="trail" type="number" min={0} max={100} value={opt.keepVersions} aria-label="古い版を残す数"
                 onChange={(e) => setOpt({ ...opt, keepVersions: Math.max(0, Math.min(100, Math.floor(Number(e.target.value) || 0))) })} />
             </label>
-            <button className="row link" type="button" disabled={busy} onClick={submit}>{busy ? "保存しています…" : "保存"}</button>
+            <div className="row"><span className="grow" /><Btn kind="pri" sm disabled={busy} onClick={submit}>{busy ? "保存しています…" : "保存"}</Btn></div>
           </>
         )}
         {note && <p className="row muted" role="status">{note}</p>}
@@ -275,8 +277,8 @@ function TargetDetail({ id }: { id: string | null }) {
         <span>
           {st.connected ? <span className="badge state-done">つながります</span> : <span className="badge state-failed">つながりません</span>}
           <span className="muted">{st.connected ? ` 応答 ${st.latencyMs} ms` : ` ${st.error}`}</span>
-          {st.space && <span className="muted">{` · 容量 ${size(st.space.total)}(空き ${size(st.space.free)})`}</span>}
-          <span className="muted">{` · 登録しているファイル ${st.files} 個(${size(st.bytes)}、うち保存した版 ${st.saved} 個)`}</span>
+          {st.space && <span className="muted">{` · 容量 ${fmtSize(st.space.total)}(空き ${fmtSize(st.space.free)})`}</span>}
+          <span className="muted">{` · 登録しているファイル ${st.files} 個(${fmtSize(st.bytes)}、うち保存した版 ${st.saved} 個)`}</span>
         </span>
       )}
       {list && (
@@ -286,7 +288,7 @@ function TargetDetail({ id }: { id: string | null }) {
           {list.entries.map((e) => (
             <span key={e.path} className={e.dir ? "muted" : ""}>
               <span className="codes" translate="no">{e.dir ? `${e.path}/` : e.path}</span>
-              {!e.dir && <span className="muted small">{` ${size(e.size)}`}</span>}
+              {!e.dir && <span className="muted small">{` ${fmtSize(e.size)}`}</span>}
               {e.item && <span className="badge muted-badge"><span translate="no">{e.item}</span></span>}
               {e.saved && <span className="badge muted-badge">保存した版</span>}
               {!e.dir && !e.item && (e.inbox ? <span className="badge">取り込み待ち</span> : <span className="badge miss">記録なし</span>)}

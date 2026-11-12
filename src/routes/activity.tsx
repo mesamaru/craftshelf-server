@@ -5,12 +5,15 @@ import { SettingsFrame } from "~/lib/settings-frame";
 import { Info } from "~/lib/ui";
 import { listEvents, notifySettings, setNotify, testNotify } from "~/lib/events-api";
 import { useCan } from "~/lib/use-can";
+import { settingsTitle } from "~/lib/titles";
+import { confirmDialog } from "~/lib/dialog-queue";
 
 export const Route = createFileRoute("/activity")({
   beforeLoad: ({ context }) => {
     if (!context.user) throw redirect({ to: "/login", search: { next: "/activity" } });
     return { user: context.user };
   },
+  head: () => ({ meta: [{ title: settingsTitle("activity") }] }),
   component: Activity,
 });
 
@@ -80,7 +83,7 @@ function Notify() {
           {s.configured && <button className="link" type="button" disabled={!!busy} onClick={() => run("test", () => test(), "送りました。Discord を確かめてください")}>試しに送る</button>}
           {s.configured && (
             <button className="trail link danger" type="button" disabled={!!busy}
-              onClick={() => confirm("Discord への通知をやめますか?(Webhook の URL を消します)") && run("off", () => save({ data: { url: null, kinds: [] } }), "通知をやめました")}>
+              onClick={async () => (await confirmDialog({ message: "Discord への通知をやめますか?(Webhook の URL を消します)", ok: "消す", danger: true })) && run("off", () => save({ data: { url: null, kinds: [] } }), "通知をやめました")}>
               通知をやめる
             </button>
           )}

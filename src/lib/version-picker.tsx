@@ -2,7 +2,9 @@
 // 初めは「合う最新版」を選んでおき、なぜその版かを 1 行で出す。非対応の版を選んで入れるときは確認を出す
 import { useEffect, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
+import { confirmDialog } from "~/lib/dialog-queue";
 import { Btn } from "~/lib/ui";
+import { localDate } from "~/lib/format";
 import { modVersions } from "~/lib/library-api";
 import { mcCompare, mcRange } from "~/lib/platforms";
 import { SOURCE_LABEL, type ItemSource } from "~/lib/sources";
@@ -19,8 +21,8 @@ export function SupportBadge({ s }: { s: VRow["support"] }) {
 }
 
 /** 選んだ版が、いまのサーバーに対応しなければ確認する(入れると動かないおそれ)。続けてよければ true */
-export const confirmUnsupported = (v: VRow, mc: string) =>
-  v.support !== "no" || confirm(`${v.versionNumber} は、このサーバー(Minecraft ${mc || "不明"})に対応していません。入れると動かないおそれがあります。それでも入れますか?`);
+export const confirmUnsupported = async (v: VRow, mc: string) =>
+  v.support !== "no" || confirmDialog({ message: `${v.versionNumber} は、このサーバー(Minecraft ${mc || "不明"})に対応していません。入れると動かないおそれがあります。それでも入れますか?`, ok: "入れる", danger: true });
 
 /** なぜその版を選んでいるか(1 行)。mc = サーバーの Minecraft バージョン */
 export function whyVersion(rows: VRow[], v: VRow | undefined, mc: string) {
@@ -55,7 +57,7 @@ export function VersionPicker({ rows, source, value, onChange, current, mc }: { 
                 {TYPE[v.type] && <span className="tag">{TYPE[v.type]}</span>}
                 {v.versionId === current && <span className="tag">今</span>}
               </span>
-              <span className="sub">{[span && `MC ${span}${gap ? `(${mc} は未対応)` : ""}`, v.date.slice(0, 10), originOf(v, source)].filter(Boolean).join(" · ")}</span>
+              <span className="sub">{[span && `MC ${span}${gap ? `(${mc} は未対応)` : ""}`, v.date && localDate(v.date), originOf(v, source)].filter(Boolean).join(" · ")}</span>
             </span>
             <SupportBadge s={v.support} />
           </button>
@@ -91,7 +93,7 @@ export function VersionChooser({ args, mc, current, label, busy, note, onChoose 
       <p className="sub vwhy" role="status">{whyVersion(rows, v, mc)}</p>
       {note && <p className="sub">{note}</p>}
       <div className="sheet-foot"><span className="grow" />
-        <Btn kind="pri" disabled={!v || busy || v.versionId === current} onClick={() => v && confirmUnsupported(v, mc) && onChoose(v, !!v.suggested)}>{label}</Btn>
+        <Btn kind="pri" disabled={!v || busy || v.versionId === current} onClick={async () => { if (v && (await confirmUnsupported(v, mc))) onChoose(v, !!v.suggested); }}>{label}</Btn>
       </div>
     </>
   );

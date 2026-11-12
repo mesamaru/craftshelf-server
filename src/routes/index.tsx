@@ -9,7 +9,7 @@ import { AddonIcon } from "~/lib/type-icon";
 import { sharedLocalEnabled } from "~/lib/servers-api";
 import { listBackups } from "~/lib/backup-api";
 import { notifySettings } from "~/lib/events-api";
-import { CHANNELS, SOURCE_LABEL, type Channel, type ItemSource, isItemSource, pageUrl } from "~/lib/sources";
+import { CHANNELS, type Channel, type ItemSource, isItemSource, pageUrl, sourceLabel } from "~/lib/sources";
 import { removeUploadedFile, uploadedFiles } from "~/lib/uploads-api";
 import { ShareMaker } from "~/lib/share-maker";
 import { saveVersion, setItemSaved, zipPlan } from "~/lib/saved-api";
@@ -19,6 +19,9 @@ import { MobileSearch, OPEN_ADD, StoragePill } from "~/lib/shell";
 import { listSets, toggleSetItem } from "~/lib/sets-api";
 import { ActionBar, Btn, Chip, Icon, Info, Menu, Sheet, fmtSize } from "~/lib/ui";
 import { SupportBadge, VersionChooser, type VRow, confirmUnsupported } from "~/lib/version-picker";
+import { pageTitle } from "~/lib/titles";
+import { itemSub } from "~/lib/item-sub";
+import { confirmDialog, promptDialog } from "~/lib/dialog-queue";
 
 // ?item= で開いているアイテム(戻るボタンで閉じる)。?type= ?f= はホームから来たときの絞り込み
 type Search = { item?: string; type?: string; f?: "upd" | "deps" | "nomc" };
@@ -32,20 +35,18 @@ export const Route = createFileRoute("/")({
     if (!context.user) throw redirect({ to: "/login" });
     return { user: context.user };
   },
+  head: () => ({ meta: [{ title: pageTitle("ライブラリ") }] }),
   component: Library,
 });
 
 const message = (e: unknown) => (e instanceof Error ? e.message : "うまくいきませんでした");
 const TYPE_LABEL: Record<string, string> = ITEM_TYPES;
-const sourceLabel = (s: string) => (isItemSource(s) ? SOURCE_LABEL[s] : s);
 const fmtDate = (iso: string) => new Date(iso).toLocaleDateString("ja-JP");
 
 type Catalog = Awaited<ReturnType<typeof libraryCatalog>>;
 type CatItem = Catalog["items"][number];
 type DepInfo = Awaited<ReturnType<typeof libraryMissingDeps>>["items"][number]["servers"];
-/** 一覧の小さな説明(v02 と同じ「版 · N バージョン · 大きさ · 日付」。無いものは出さない) */
-const subOf = (i: CatItem, date = true) =>
-  [i.version, i.files ? `${i.files} バージョン` : "", i.size ? fmtSize(i.size) : "", date ? fmtDate(i.createdAt) : ""].filter(Boolean).join(" · ");
+const subOf = itemSub; // 一覧の小さな説明(src/lib/item-sub.ts)
 
 // 一覧の絞り込み・並べ替え。oldIds は「更新あり」(アイテム → 古い版のサーバー)、depIds は「前提不足」を確かめた結果(確かめるまでは null)
 type Sort = "fav" | "name" | "new" | "old" | "size" | "count";
@@ -154,10 +155,10 @@ function Library() {
       {cat && cat.items.length > 0 && (
         <div className="lsum">
           <button type="button" className={`ls-tile upd${f.old ? " on" : ""}`} aria-pressed={f.old} onClick={toggleOld} title="どこかのサーバーに古い版が入っているもの(配布元に問い合わせます。更新を止めたものは除きます)">
-            <span className="l"><Icon name="reload" />更新あり</span><span className="v">{f.oldIds ? f.oldIds.size : "—"}</span>
+            <span className="l"><Icon name="reload" />更新あり</span><span className="v">{f.oldIds ? f.oldIds.size : "—"}</span>{!f.oldIds && <span className="h">押すと確かめます</span>}
           </button>
           <button type="button" className={`ls-tile deps${f.deps ? " on" : ""}`} aria-pressed={f.deps} onClick={toggleDeps} title="入っているサーバーに、必須の前提が無いもの(配布元に問い合わせます)">
-            <span className="l"><Icon name="puzzle" />前提不足</span><span className="v">{f.depIds ? f.depIds.size : "—"}</span>
+            <span className="l"><Icon name="puzzle" />前提不足</span><span className="v">{f.depIds ? f.depIds.size : "—"}</span>{!f.depIds && <span className="h">押すと確かめます</span>}
           </button>
         </div>
       )}
@@ -369,6 +370,7 @@ function Bulk({ ids, cat, share, allShown, onAll, onClear, onDone }:
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [res, setRes] = useState<{ server: string; ok: number; already: number; failed: [string, string][] } | null>(null); // 「サーバーに入れる」の結果
   useEffect(() => { loadSets().then(setSets, () => setSets([])); }, []);
   const items = cat.items.filter((i) => ids.includes(i.id));
   const none = busy || !ids.length;
@@ -387,8 +389,8 @@ function Bulk({ ids, cat, share, allShown, onAll, onClear, onDone }:
       setBusy(false);
     }
   };
-  const addTag = () => {
-    const t = prompt("付けるタグ(30 文字まで)")?.trim();
+  const addTag = async () => {
+    const t = await promptDialog({ title: "タグを付ける", placeholder: "付けるタグ(30 文字まで)", max: 30 });
     if (t) run(async () => { await tag({ data: { itemIds: ids, tag: t, on: true } }); return `タグ「${t}」を付けました`; }, false);
   };
   const addToSet = (s: { id: string; name: string }) =>
@@ -396,19 +398,28 @@ function Bulk({ ids, cat, share, allShown, onAll, onClear, onDone }:
   // そのサーバーに入れられるもの(種類が合い、まだ入っていない。Modパックはアイテムのシートから)
   const fits = (s: Catalog["servers"][number]) => items.filter((i) => isItemSource(i.source) && i.projectType !== "modpack"
     && s.kinds.includes(i.projectType as ItemType) && !i.installs.some((x) => x.serverId === s.id));
-  const installAll = (s: Catalog["servers"][number]) => run(async () => {
-    let ok = 0;
+  // 入れた・すでに入っていた・入れられなかった(理由つき)を、シートの中に出す(シートは閉じない)
+  const already = (s: Catalog["servers"][number]) => items.filter((i) => i.installs.some((x) => x.serverId === s.id)).length;
+  const installAll = async (s: Catalog["servers"][number]) => {
+    setBusy(true);
+    setError("");
+    setNote("");
+    setRes(null);
+    const out = { server: s.name, ok: 0, already: already(s), failed: [] as [string, string][] };
     for (const i of fits(s)) {
       try {
         await install({ data: { id: s.id, projectId: i.projectId, source: i.source as ItemSource } });
-        ok++;
-      } catch {}
+        out.ok++;
+      } catch (e) {
+        out.failed.push([i.title, message(e)]);
+      }
     }
-    const failed = fits(s).length - ok;
-    return failed ? `${ok} 件を入れました。${failed} 件は入れられませんでした` : `${ok} 件を入れました`;
-  }, false);
-  const removeAll = () => {
-    if (confirm(`${ids.length} 件をライブラリから外しますか?(サーバーに入っているファイルはそのままです)`)) {
+    setRes(out);
+    setBusy(false);
+    onDone(false);
+  };
+  const removeAll = async () => {
+    if ((await confirmDialog({ message: `${ids.length} 件をライブラリから外しますか?(サーバーに入っているファイルはそのままです)`, ok: "外す", danger: true }))) {
       run(async () => { for (const itemId of ids) await remove({ data: { itemId } }); return `${ids.length} 件を外しました`; }, true);
     }
   };
@@ -441,14 +452,25 @@ function Bulk({ ids, cat, share, allShown, onAll, onClear, onDone }:
           <section className="group">
             {cat.servers.map((s) => {
               const n = fits(s).length;
+              const have = already(s);
+              const other = items.length - n - have; // 種類が合わない・入れられないもの
               return (
                 <div key={s.id} className="row">
-                  <span className="mid"><span className="ttl" translate="no">{s.name}</span><span className="sub">{`${n} 件`}</span></span>
-                  <Btn kind="tint" sm disabled={!n} onClick={() => installAll(s)}>入れる</Btn>
+                  <span className="mid"><span className="ttl" translate="no">{s.name}</span>
+                    <span className="sub">{[n ? `${n} 件を入れる` : "入れるものはありません", have ? `入っている ${have}` : "", other > 0 ? `種類が合わない ${other}` : ""].filter(Boolean).join(" · ")}</span></span>
+                  <Btn kind="tint" sm disabled={!n || busy} onClick={() => installAll(s)}>入れる</Btn>
                 </div>
               );
             })}
           </section>
+          {res && (
+            <section className="group" role="status">
+              <div className="row"><span className="main">
+                <span><span translate="no">{res.server}</span>: {[res.ok ? `入れた ${res.ok}` : "", res.already ? `すでに入っていた ${res.already}` : "", res.failed.length ? `入れられなかった ${res.failed.length}` : ""].filter(Boolean).join(" · ") || "入れるものはありませんでした"}</span>
+                {res.failed.map(([t, why]) => <span key={t} className="error"><span translate="no">{t}</span>: {why}</span>)}
+              </span></div>
+            </section>
+          )}
         </Sheet>
       )}
       {sheet === "share" && (
@@ -503,7 +525,7 @@ function ItemSheet({ item, cat, edit, admin, local, old, depInfo, onChange, onDe
     for (const id of old ?? []) await install({ data: { id, projectId: item.projectId, source: item.source as ItemSource } });
     setNote(`${old?.size ?? 0} 台を更新しました`);
   }, () => { onChange(); onDeps(); });
-  const addTag = () => { const t = prompt("付けるタグ(30 文字まで)")?.trim(); if (t) run("tag", () => tag({ data: { itemIds: [item.id], tag: t, on: true } })); };
+  const addTag = async () => { const t = await promptDialog({ title: "タグを付ける", placeholder: "付けるタグ(30 文字まで)", max: 30 }); if (t) run("tag", () => tag({ data: { itemIds: [item.id], tag: t, on: true } })); };
   return (
     <Sheet title={<span className="badge cat">{TYPE_LABEL[item.projectType] ?? item.projectType}</span>} label={item.title} onClose={onClose}
       actions={<>
@@ -514,7 +536,7 @@ function ItemSheet({ item, cat, edit, admin, local, old, depInfo, onChange, onDe
           edit && !pack && !!old?.size && { label: "すべて更新", onClick: updateAll },
           edit && pack && { label: newer ? "新しい版でセットを作る" : "セットを作る", onClick: () => packRun() },
           edit && { label: "タグを付ける", onClick: addTag },
-          edit && { label: "ライブラリから外す", danger: true, onClick: () => { if (confirm(`${item.title} をライブラリから外しますか?(サーバーに入っているファイルはそのままです)`)) run("remove", () => remove({ data: { itemId: item.id } }), onRemoved); } },
+          edit && { label: "ライブラリから外す", danger: true, onClick: async () => { if ((await confirmDialog({ message: `${item.title} をライブラリから外しますか?(サーバーに入っているファイルはそのままです)`, ok: "外す", danger: true }))) run("remove", () => remove({ data: { itemId: item.id } }), onRemoved); } },
         ]} />
       </>}>
       <div className="item-head">
@@ -618,10 +640,10 @@ function PutRow({ s, item, pack, onPack, onInstalled }: { s: Catalog["servers"][
   const v = chosen?.v ?? rows?.find((r) => r.suggested);
   const put = async () => {
     if (pack) {
-      if (confirm("Modパックの中の Mod と設定ファイル(overrides)を、このサーバーに入れますか?(同じ名前のセットも作ります。上書きした設定ファイルは履歴から戻せます)")) onPack(s.id);
+      if ((await confirmDialog({ message: "Modパックの中の Mod と設定ファイル(overrides)を、このサーバーに入れますか?(同じ名前のセットも作ります。上書きした設定ファイルは履歴から戻せます)", ok: "入れる" }))) onPack(s.id);
       return;
     }
-    if (v && !confirmUnsupported(v, s.mc)) return;
+    if (v && !(await confirmUnsupported(v, s.mc))) return;
     setBusy(true);
     setError("");
     try {
@@ -826,8 +848,8 @@ function EditInfo({ item, teamChannel, onDone, onClose }: { item: CatItem; teamC
       setBusy(false);
     }
   };
-  const doRelink = () => {
-    if (!url.trim() || !confirm("配布元を付け替えますか?(サーバーに入っているものは、次の更新で新しいプロジェクトの版に入れ替わります)")) return;
+  const doRelink = async () => {
+    if (!url.trim() || !(await confirmDialog({ message: "配布元を付け替えますか?(サーバーに入っているものは、次の更新で新しいプロジェクトの版に入れ替わります)", ok: "付け替える" }))) return;
     run(async () => { const r = await relink({ data: { itemId: item.id, url } }); setUrl(""); return `${r.title} に付け替えました`; });
   };
   return (
@@ -842,7 +864,7 @@ function EditInfo({ item, teamChannel, onDone, onClose }: { item: CatItem; teamC
             </select>
           </label>
           <label className="edit-field">
-            <span className="muted small">動く作り(カンマで区切る。空なら配布元のとおり)</span>
+            <span className="muted small">対応サーバー(カンマで区切る。空なら配布元のとおり)</span>
             <input value={loaders} disabled={busy} placeholder="例: paper, spigot" onChange={(e) => setLoaders(e.target.value)} />
           </label>
           <label className="edit-field">
@@ -918,7 +940,7 @@ function Files({ item, keep, edit, local, onChange }: { item: CatItem; keep: Cat
           </span>
           <a className="rbtn sm" href={`/api/library/files/${f.id}`} download aria-label="ダウンロード" title="ダウンロード"><Icon name="download" /></a>
           {edit && <button type="button" className="rbtn sm red" aria-label="削除" title="削除"
-            onClick={() => confirm(`${f.filename} を消しますか?(保存先からも消えます。サーバーに入っているものはそのままです)`) && remove({ data: { fileId: f.id } }).then(() => { reload(); onChange(); }, (e) => setError(message(e)))}><Icon name="trash" /></button>}
+            onClick={async () => (await confirmDialog({ message: `${f.filename} を消しますか?(保存先からも消えます。サーバーに入っているものはそのままです)`, ok: "消す", danger: true })) && remove({ data: { fileId: f.id } }).then(() => { reload(); onChange(); }, (e) => setError(message(e)))}><Icon name="trash" /></button>}
         </div>
       ))}
       {edit && local && upstream && <button className="row link" type="button" disabled={busy} onClick={() => run(async () => {

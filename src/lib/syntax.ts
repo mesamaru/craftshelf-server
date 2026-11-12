@@ -1,8 +1,11 @@
 // 設定ファイルの書き方の確かめ(保存する前に画面で読んでみる。v02 の check_syntax と同じ考え)。
 // JSON・YAML・TOML・properties だけを見る。読むための部品(yaml・smol-toml)は、使うときに読み込む
+import { confirmDialog } from "./dialog-queue";
 
 const first = (s: string) => s.split("\n")[0].trim();
 const lineAt = (text: string, pos: number) => text.slice(0, pos).split("\n").length;
+/** YAML は、閉じていないまま終わると「最後の改行のあとの行」を指す(ファイルに無い行)。実際にある最後の行までに収める */
+export const yamlLine = (text: string, line: number | undefined) => (line ? Math.min(line, text.replace(/\s+$/, "").split("\n").length || 1) : line);
 const say = (kind: string, line: number | null | undefined, detail: string) =>
   `${line ? `${line} 行目: ` : ""}${kind} の書き方が正しくありません(${detail})`;
 
@@ -81,7 +84,7 @@ export async function syntaxError(path: string, text: string): Promise<string | 
     const { parseAllDocuments } = await import("yaml");
     const docs = parseAllDocuments(text);
     const err = Array.isArray(docs) ? docs.flatMap((d) => d.errors)[0] : undefined;
-    return err ? say("YAML", err.linePos?.[0].line, first(err.message).replace(/ at line \d+, column \d+:?$/, "")) : null;
+    return err ? say("YAML", yamlLine(text, err.linePos?.[0].line), first(err.message).replace(/ at line \d+, column \d+:?$/, "")) : null;
   }
   if (ext === "toml") {
     const { parse, TomlError } = await import("smol-toml");
@@ -108,5 +111,5 @@ export async function syntaxError(path: string, text: string): Promise<string | 
 /** 誤りがあれば知らせて、それでも保存するかを聞く(保存してよければ true) */
 export async function confirmSyntax(path: string, text: string) {
   const err = await syntaxError(path, text);
-  return !err || confirm(`${err}\n\nそれでも保存しますか?`);
+  return !err || confirmDialog({ title: "書き方に問題があります", message: `${err}\n\nそれでも保存しますか?`, ok: "保存する" });
 }

@@ -5,6 +5,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { fileHistory, listFiles, readServerFile, saveServerFile, sendCommand, serverLogs } from "./files-api";
 import { confirmSyntax, syntaxError } from "./syntax";
 import { Btn, Info, Sheet } from "./ui";
+import { confirmDialog } from "~/lib/dialog-queue";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : "うまくいきませんでした");
 
@@ -56,12 +57,12 @@ export function Console({ id, local }: { id: string; local: boolean }) {
         <label className="small"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> 自動で読み直す</label>
         <Btn sm onClick={reload}>読み直す</Btn>
       </div>
-      <pre className="console" ref={box} translate="no" tabIndex={0} aria-label={data?.file ?? "logs/latest.log"}>
+      <pre className="console" ref={box} tabIndex={0} aria-label={data?.file ?? "logs/latest.log"}>
         {error ? <span className="err">{error}</span>
           : !data ? <span className="muted">読み込み中…</span>
           : !data.found ? <span className="muted">ログのファイルが見つかりません。サーバーを一度起動すると作られます。</span>
           : lines.length === 0 ? <span className="muted">{q ? "一致する行はありません" : "ログはまだありません"}</span>
-          : lines.map((l, i) => <span key={i} className={/\b(ERROR|SEVERE|FATAL)\b|Exception/.test(l) ? "err" : /\bWARN(ING)?\b/.test(l) ? "warn" : ""}>{l + "\n"}</span>)}
+          : lines.map((l, i) => <span key={i} translate="no" className={/\b(ERROR|SEVERE|FATAL)\b|Exception/.test(l) ? "err" : /\bWARN(ING)?\b/.test(l) ? "warn" : ""}>{l + "\n"}</span>)}
       </pre>
       <form className="cmd" onSubmit={(e) => (e.preventDefault(), submit())}>
         <input className="input" placeholder="例 say こんにちは(先頭の / は要りません)" value={cmd} maxLength={500} onChange={(e) => setCmd(e.target.value)} aria-label="コマンド" />
@@ -73,6 +74,10 @@ export function Console({ id, local }: { id: string; local: boolean }) {
     </>
   );
 }
+
+// 外したアドオン(.craftshelf-removed)・戻す前のワールド(.craftshelf-before-restore-…)は、消さずに名前を変えて残したもの
+const ASIDE = /\.craftshelf-(removed|before-restore-.*)$/;
+const Aside = () => <span className="tag" title="CraftShelf が、外したり戻したりするときに、消さずに名前を変えて残したものです。「変更の履歴」から元に戻せます。要らなければ消しても構いません。">退避</span>;
 
 type Listing = Awaited<ReturnType<typeof listFiles>>;
 type Opened = Awaited<ReturnType<typeof readServerFile>>;
@@ -112,7 +117,7 @@ export function Files({ id }: { id: string }) {
     return (
       <>
         <div className="cmd">
-          <Btn sm onClick={() => (!changed || confirm("保存していない変更を捨てますか?")) && setOpened(null)}>‹ 戻る</Btn>
+          <Btn sm onClick={async () => (!changed || (await confirmDialog({ message: "保存していない変更を捨てますか?", ok: "捨てる", danger: true }))) && setOpened(null)}>‹ 戻る</Btn>
           <span className="path grow" translate="no">{opened.path}</span>
         </div>
         <textarea className="codes editor wide" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label={`${opened.path} の中身`} />
@@ -162,9 +167,9 @@ export function Files({ id }: { id: string }) {
   const parts = listing?.dir ? listing.dir.split("/") : [];
   return (
     <>
-      <div className="chips" translate="no">
-        <button className="chip" type="button" onClick={() => go("")}>/</button>
-        {parts.map((p, i) => <button key={i} className="chip" type="button" onClick={() => go(parts.slice(0, i + 1).join("/"))}>{p}/</button>)}
+      <div className="chips">
+        <button className="chip" type="button" translate="no" onClick={() => go("")}>/</button>
+        {parts.map((p, i) => <button key={i} className="chip" type="button" translate="no" onClick={() => go(parts.slice(0, i + 1).join("/"))}>{p}/</button>)}
         <Info>テキストの設定ファイル(.properties・.yml・.json・.toml など、512 KB まで)を開いて直せます。保存する前の中身は履歴に残り、そこから戻せます。</Info>
       </div>
       <section className="group">
@@ -172,17 +177,19 @@ export function Files({ id }: { id: string }) {
         {listing?.entries.length === 0 && <div className="row muted">空のフォルダーです。</div>}
         {listing?.entries.map((e) => {
           const path = [listing.dir, e.name].filter(Boolean).join("/");
+          const aside = ASIDE.test(e.name); // 外した・戻す前に退避したもの(消さずに名前を変えて残している)
           if (!e.isFile) {
             return (
-              <button key={e.name} className="row click" type="button" onClick={() => go(path)}>
-                <span aria-hidden="true">📁</span><span className="mid"><span className="ttl" translate="no">{e.name}</span></span><span className="chev">›</span>
+              <button key={e.name} className={`row click${aside ? " aside" : ""}`} type="button" onClick={() => go(path)}>
+                <span aria-hidden="true">📁</span><span className="mid"><span className={aside ? "ttl wrapname" : "ttl"} translate="no">{e.name}</span></span>{aside && <Aside />}<span className="chev">›</span>
               </button>
             );
           }
           return (
-            <div key={e.name} className={`row${e.editable ? " click" : ""}`} onClick={e.editable ? () => open(path) : undefined}>
+            <div key={e.name} className={`row${e.editable ? " click" : ""}${aside ? " aside" : ""}`} onClick={e.editable ? () => open(path) : undefined}>
               <span aria-hidden="true">📄</span>
-              <span className="mid"><span className={e.editable ? "ttl" : "ttl muted"} translate="no">{e.name}</span></span>
+              <span className="mid"><span className={`${e.editable ? "ttl" : "ttl muted"}${aside ? " wrapname" : ""}`} translate="no">{e.name}</span></span>
+              {aside && <Aside />}
               {e.editable && <Btn sm disabled={!!busy} onClick={(ev) => { ev.stopPropagation(); open(path); }}>開く</Btn>}
             </div>
           );

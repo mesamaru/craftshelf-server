@@ -13,7 +13,9 @@ import { useCan } from "~/lib/use-can";
 import { useServerFn } from "@tanstack/react-start";
 import { ASSIGNABLE_ROLES, GRANTS, GRANT_LABELS, type Grant, type RoleName, roleLabel } from "~/lib/permissions";
 import { serverAssignments, setServerAssignment } from "~/lib/servers-api";
+import { settingsTitle } from "~/lib/titles";
 import { deleteTeam, memberGrants, resetSignIn, setMemberGrants, transferOwner } from "~/lib/teams-api";
+import { confirmDialog } from "~/lib/dialog-queue";
 
 export const Route = createFileRoute("/team")({
   validateSearch: (s: Record<string, unknown>): { s?: string } => (typeof s.s === "string" ? { s: s.s } : {}),
@@ -21,6 +23,7 @@ export const Route = createFileRoute("/team")({
     if (!context.user) throw redirect({ to: "/login" });
     return { user: context.user };
   },
+  head: ({ match }) => ({ meta: [{ title: settingsTitle(match.search.s ?? "members") }] }),
   component: Team,
 });
 
@@ -117,7 +120,7 @@ function Switcher({ activeId }: { activeId?: string }) {
             {t.id === activeId && <span className="trail">✓</span>}
           </button>
         ))}
-        <input className="row" placeholder="新しいチームの名前" translate="no" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="row" placeholder="新しいチームの名前" value={name} onChange={(e) => setName(e.target.value)} />
         <button className="btn sec" type="button" onClick={create} disabled={!name.trim()}>チームを作る</button>
         {error && <p className="row error" role="alert">{error}</p>}
       </section>
@@ -138,7 +141,7 @@ function TeamName({ id, name, editable, onDone }: { id: string; name: string; ed
     <form className="group" onSubmit={(e) => (e.preventDefault(), save())}>
       <label className="row">
         <span>チームの名前</span>
-        <input className="trail field" translate="no" maxLength={60} value={value} onChange={(e) => setValue(e.target.value)} aria-label="チームの名前" />
+        <input className="trail field" maxLength={60} value={value} onChange={(e) => setValue(e.target.value)} aria-label="チームの名前" />
         {value !== name && <Btn kind="pri" sm type="submit" disabled={!value.trim()}>保存</Btn>}
       </label>
       {error && <p className="row error" role="alert">{error}</p>}
@@ -157,7 +160,7 @@ function MemberRow({ member, isMe, editable, removable, onDone }:
     onDone();
   };
   const remove = async () => {
-    if (!confirm(`${member.user.name} さんをチームから外しますか?`)) return;
+    if (!(await confirmDialog({ message: `${member.user.name} さんをチームから外しますか?`, ok: "外す", danger: true }))) return;
     const { error } = await authClient.organization.removeMember({ memberIdOrEmail: member.id });
     if (error) return setError(errorText(error));
     onDone();
@@ -240,7 +243,7 @@ function InviteRow({ id, email, role, cancelable, onDone }:
 function Leave({ teamId }: { teamId: string }) {
   const [error, setError] = useState("");
   const leave = async () => {
-    if (!confirm("このチームから抜けますか?")) return;
+    if (!(await confirmDialog({ message: "このチームから抜けますか?", ok: "抜ける", danger: true }))) return;
     const { error } = await authClient.organization.leave({ organizationId: teamId });
     if (error) return setError(errorText(error));
     location.href = "/team";
@@ -462,17 +465,17 @@ function OwnerTools({ teamName, service, members }: { teamName: string; service:
               {members.map((m) => <option key={m.userId} value={m.userId} translate="no">{m.name}</option>)}
             </select>
           </div>
-          <button className="row link" type="button" disabled={busy || !to} onClick={() => {
+          <button className="row link" type="button" disabled={busy || !to} onClick={async () => {
             const name = members.find((m) => m.userId === to)?.name ?? "";
-            if (confirm(`${name} さんにオーナーを譲りますか?(あなたは管理者になります)`)) run(() => transfer({ data: { userId: to } }));
+            if ((await confirmDialog({ message: `${name} さんにオーナーを譲りますか?(あなたは管理者になります)`, ok: "譲る", danger: true }))) run(() => transfer({ data: { userId: to } }));
           }}>譲る</button>
         </section>
       )}
       {service && (
         <section className="group">
           <input className="row" placeholder={`消すときは、チームの名前(${teamName})を入力`} value={confirmName} onChange={(e) => setConfirmName(e.target.value)} aria-label="消すチームの名前" />
-          <button className="row danger" type="button" disabled={busy || confirmName.trim() !== teamName} onClick={() => {
-            if (confirm("チームを消しますか?サーバー・ライブラリ・セットなど、このチームのものはすべて消え、元に戻せません(サーバーのファイルは消えません)")) run(() => remove({ data: { name: confirmName } }));
+          <button className="row danger" type="button" disabled={busy || confirmName.trim() !== teamName} onClick={async () => {
+            if ((await confirmDialog({ message: "チームを消しますか?サーバー・ライブラリ・セットなど、このチームのものはすべて消え、元に戻せません(サーバーのファイルは消えません)", ok: "消す", danger: true }))) run(() => remove({ data: { name: confirmName } }));
           }}>このチームを消す</button>
         </section>
       )}
@@ -491,7 +494,7 @@ function SignInHelp({ members }: { members: { userId: string; name: string }[] }
   if (!members.length) return null;
   const run = async (what: "twoFactor" | "passkeys", ask: string) => {
     const name = members.find((m) => m.userId === to)?.name ?? "";
-    if (!confirm(`${name} さんの${ask}`)) return;
+    if (!(await confirmDialog({ message: `${name} さんの${ask}`, ok: what === "twoFactor" ? "外す" : "消す", danger: true }))) return;
     setError("");
     setNote("");
     try {

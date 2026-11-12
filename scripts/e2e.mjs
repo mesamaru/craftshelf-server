@@ -20,7 +20,7 @@ const step = async (name, fn) => {
     console.log("ok  ", name);
   } catch (e) {
     fails++;
-    console.log("FAIL", name, "-", e.message.split("\n")[0]);
+    console.log("FAIL", name, "-", e.message.split("\n")[0], (e.stack?.match(/e2e\.mjs:\d+/) ?? [""])[0]); // 落ちた行も出す
     await page.screenshot({ path: `.e2e/fail-${fails}.png`, fullPage: true });
   }
 };
@@ -131,7 +131,27 @@ await step("セットを作ると一覧に出る", async () => {
   await page.locator(".set-card", { hasText: "ロビー用" }).getByRole("button", { name: "サーバーに入れる" }).waitFor(); // カードの操作
   await page.locator(".set-card", { hasText: "ロビー用" }).getByRole("button", { name: "編集" }).click(); // 編集はシートで中身
   await page.getByRole("dialog").getByText(/まだ何も入っていません。先にライブラリ/).waitFor();
+  // 名前を変える(標準の prompt ではなく、アプリの入力のダイアログ)。やめる・空は閉じない・決定で変わる
+  await page.getByRole("dialog").getByRole("button", { name: "その他の操作" }).click();
+  await page.getByRole("menuitem", { name: "名前を変える" }).click();
+  const ask = page.getByRole("alertdialog");
+  await ask.getByRole("textbox").waitFor();
+  if ((await ask.getByRole("textbox").inputValue()) !== "ロビー用") throw new Error("入力欄に今の名前が入っていません");
+  await page.screenshot({ path: ".e2e/prompt.png" });
+  await ask.getByRole("textbox").fill("");
+  await ask.getByRole("button", { name: "決定" }).click();
+  await ask.getByRole("alert").waitFor(); // 空は閉じずにエラー
+  await ask.getByRole("button", { name: "キャンセル" }).click();
+  await ask.waitFor({ state: "detached" });
+  await page.getByRole("dialog").getByText(/まだ何も入っていません。先にライブラリ/).waitFor(); // 下のシートは閉じていない
+  await page.getByRole("dialog").getByRole("button", { name: "その他の操作" }).click();
+  await page.getByRole("menuitem", { name: "名前を変える" }).click();
+  await ask.getByRole("textbox").fill("ロビー用2");
+  await page.keyboard.press("Enter");
+  await ask.waitFor({ state: "detached" });
+  await page.getByRole("dialog").getByRole("heading", { name: "ロビー用2" }).waitFor();
   await page.keyboard.press("Escape");
+  await page.locator(".set-card", { hasText: "ロビー用2" }).waitFor();
   await page.getByRole("button", { name: "予約", exact: true }).click(); // 予約もシート
   await page.getByRole("dialog").getByText("予約を使う").waitFor();
   await page.keyboard.press("Escape");
@@ -233,7 +253,7 @@ await step("フォルダのサーバーを足すと、一覧と詳細のタブ�
   await page.waitForURL(/tab=backup/);
   await page.getByText("変更の履歴", { exact: true }).first().waitFor();
   await page.getByRole("tab", { name: "設定" }).click();
-  await page.getByText("種類とバージョン").click();
+  await page.getByText("アドオンの種類とバージョン", { exact: true }).click();
   await page.getByRole("dialog").getByLabel("サーバーの種類").waitFor();
   if ((await page.getByRole("dialog").getByLabel("サーバーの種類").inputValue()) !== "paper") throw new Error("jar の名前から種類が決まっていません");
   await page.screenshot({ path: ".e2e/server-settings.png" });
@@ -332,10 +352,30 @@ await step("ドラッグ&ドロップの欄から jar を足すと、一覧と�
   await sheet.getByRole("button", { name: "その他の操作" }).click();
   await page.getByRole("menuitem", { name: "サーバーに入れる…" }).click();
   await page.getByRole("dialog", { name: "サーバーに入れる" }).getByText("E2E").waitFor();
-  await page.getByRole("dialog", { name: "サーバーに入れる" }).getByText(/サーバー 1\.21\.4 に合う最新版/).waitFor(); // サーバーごとに、そのサーバーに合う最新版を出す
+  await page.getByRole("dialog", { name: "サーバーに入れる" }).getByText(/サーバー 1\.21\.4 に合う最新版/).first().waitFor(); // サーバーごとに、そのサーバーに合う最新版を出す
   await page.screenshot({ path: ".e2e/library-sheet.png" });
   await page.keyboard.press("Escape"); // 重ねたシートは上のものだけ閉じる
   await page.getByRole("dialog", { name: "サーバーに入れる" }).waitFor({ state: "detached" });
+  await sheet.getByText("保存しているバージョン(1)").waitFor();
+  // タグを付ける(入力のダイアログ): フォーカスは中に入り、Tab は中を回る。Enter で決定
+  await sheet.getByRole("button", { name: "その他の操作" }).click();
+  await page.getByRole("menuitem", { name: "タグを付ける" }).click();
+  const ask = page.getByRole("alertdialog");
+  await ask.getByRole("textbox").waitFor();
+  const inside = () => ask.evaluate((el) => el.contains(document.activeElement));
+  if (!(await inside())) throw new Error("ダイアログにフォーカスが入っていません");
+  for (let i = 0; i < 4; i++) { await page.keyboard.press("Tab"); if (!(await inside())) throw new Error("Tab でダイアログの外に出ました"); }
+  await ask.getByRole("textbox").fill("e2e-tag");
+  await page.keyboard.press("Enter");
+  await ask.waitFor({ state: "detached" });
+  await sheet.getByText("e2e-tag", { exact: true }).waitFor();
+  // 外す(確認): Esc でやめると何も起きず、下のシートも閉じない
+  await sheet.getByRole("button", { name: "その他の操作" }).click();
+  await page.getByRole("menuitem", { name: "ライブラリから外す" }).click();
+  await ask.getByText(/ライブラリから外しますか/).waitFor();
+  await page.screenshot({ path: ".e2e/confirm.png" });
+  await page.keyboard.press("Escape");
+  await ask.waitFor({ state: "detached" });
   await sheet.getByText("保存しているバージョン(1)").waitFor();
   await page.goBack(); // 戻るボタンで詳しくを閉じる
   await page.getByRole("dialog").waitFor({ state: "detached" });
@@ -496,6 +536,57 @@ await step("JS・CSS は事前に圧縮して届く(gzip・br。展開すると�
   page.off("response", onResponse);
   const bad = encoded.filter(([n, e]) => n >= 2048 && e !== "gzip");
   if (bad.length) throw new Error(`1 KB 以上の server function が圧縮されていません: ${JSON.stringify(bad)}`);
+});
+
+// 03.73.02: 画面ごとのタイトル・Ctrl K の名前・フォルダのサーバーの起動のつまずき・スマホのタブ
+await step("ページのタイトルが画面ごとに変わる(サーバーは名前、設定はまとまりの名前)", async () => {
+  const title = async (p) => { await page.goto(base + p); await page.waitForFunction(() => document.title !== "CraftShelf", null, { timeout: 5000 }); return page.title(); };
+  const want = [["/", "ライブラリ - CraftShelf"], ["/home", "ホーム - CraftShelf"], ["/sets", "セット - CraftShelf"], ["/compare", "比較 - CraftShelf"], ["/jobs", "処理 - CraftShelf"],
+    ["/team", "設定: ユーザーと権限 - CraftShelf"], ["/settings?s=passkeys", "設定: パスキー - CraftShelf"], ["/storage", "設定: ストレージ - CraftShelf"], ["/activity", "設定: 操作の記録と通知 - CraftShelf"]];
+  for (const [p, t] of want) { const got = await title(p); if (got !== t) throw new Error(`${p} のタイトルが ${got}(${t} のはず)`); }
+  await page.goto(base + "/servers");
+  const link = page.locator(".srv-side a.row", { hasText: "E2E" }).first();
+  if (await link.count()) {
+    await link.click();
+    await page.waitForFunction(() => /^サーバー: E2E/.test(document.title), null, { timeout: 5000 });
+  }
+});
+
+await step("Ctrl K に、いまのメニュー・設定の名前の行き先が出る(古い名前は出ない)", async () => {
+  await page.goto(base + "/home");
+  await page.keyboard.press("Control+k");
+  await page.getByRole("dialog", { name: "検索" }).waitFor();
+  await page.locator(".palette-input").fill("設定");
+  await page.locator(".palette-hit", { hasText: "ユーザーと権限" }).waitFor();
+  for (const n of ["ストレージ", "ユーザーごとの利用状況", "操作の記録と通知", "パスキー"]) await page.locator(".palette-hit", { hasText: n }).first().waitFor();
+  await page.locator(".palette-input").fill("サーバー本体");
+  await page.locator(".palette-hit", { hasText: "サーバー本体" }).waitFor();
+  await page.locator(".palette-input").fill("チーム");
+  if (await page.locator(".palette-hit", { hasText: /^チーム/ }).count()) throw new Error("古い名前の「チーム」が出ています");
+  await page.locator(".palette-input").fill("お知らせ");
+  await page.keyboard.press("Enter");
+  await page.getByRole("dialog", { name: "お知らせ" }).waitFor();
+  await page.keyboard.press("Escape");
+});
+
+await step("起動・停止の設定が無いフォルダのサーバーで「起動」を押すと、設定を開くリンクが出る。スマホでは選んだタブが見える", async () => {
+  await page.goto(base + "/servers");
+  const link = page.locator(".srv-side a.row", { hasText: "E2E" }).first();
+  if (!(await link.count())) return console.log("     (フォルダのサーバーは自分用の版だけ)");
+  await link.click();
+  await page.locator(".srv-qacts").getByRole("button", { name: "起動", exact: true }).click();
+  await page.getByRole("button", { name: "起動・停止の設定を開く" }).click();
+  await page.waitForURL(/tab=settings/);
+  await page.getByRole("dialog").getByLabel("起動・停止の方法").waitFor();
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await page.locator(".srv-page > .tabs [aria-selected=true]").waitFor();
+  await page.waitForTimeout(300);
+  const seen = await page.evaluate(() => { const t = document.querySelector(".srv-page > .tabs"); const b = t.querySelector("[aria-selected=true]").getBoundingClientRect(); const r = t.getBoundingClientRect(); return b.left >= r.left - 1 && b.right <= r.right + 1; });
+  if (!seen) throw new Error("スマホで、選んだタブが帯の外にあります");
+  if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error("スマホで横にはみ出しています");
+  await page.setViewportSize({ width: 1280, height: 720 });
 });
 
 await step("英語の辞書は英語のときだけ読み込む(日本語では届かない)。英語にすると訳される", async () => {

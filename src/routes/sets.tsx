@@ -9,12 +9,14 @@ import { ITEM_TYPES, PLATFORMS, PLATFORM_IDS } from "~/lib/platforms";
 import { AddonIcon } from "~/lib/type-icon";
 import { addSetDeps, applySet, createSet, listSets, pinSetItem, removeSet, renameSet, setMissingDeps, syncServerSet, toggleSetItem } from "~/lib/sets-api";
 import { Btn, Chip, Info, Menu, Sheet } from "~/lib/ui";
-import { SOURCE_LABEL, isSource } from "~/lib/sources";
+import { sourceLabel } from "~/lib/sources";
 import { useCan } from "~/lib/use-can";
 import { sharedLocalEnabled } from "~/lib/servers-api";
 import { zipPlan } from "~/lib/saved-api";
 import { MobileSearch, StoragePill } from "~/lib/shell";
 import { downloadZip } from "~/lib/zip-download";
+import { pageTitle } from "~/lib/titles";
+import { confirmDialog, promptDialog } from "~/lib/dialog-queue";
 
 export const Route = createFileRoute("/sets")({
   beforeLoad: ({ context }) => {
@@ -22,6 +24,7 @@ export const Route = createFileRoute("/sets")({
     return { user: context.user };
   },
   loader: async () => ({ sets: await listSets(), catalog: await libraryCatalog() }),
+  head: () => ({ meta: [{ title: pageTitle("セット") }] }),
   component: Sets,
 });
 
@@ -117,7 +120,7 @@ function SetCard({ set, edit, local, onOpen, onChange }: { set: SetRow; edit: bo
           {edit && <Btn sm onClick={onOpen}>サーバーに入れる</Btn>}
           <Btn sm onClick={onOpen}>{edit ? "編集" : "開く"}</Btn>
           {edit && <Btn kind="red" sm onClick={async () => {
-            if (!confirm(`セット「${set.name}」を消しますか?(ライブラリとサーバーはそのままです)`)) return;
+            if (!(await confirmDialog({ message: `セット「${set.name}」を消しますか?(ライブラリとサーバーはそのままです)`, ok: "消す", danger: true }))) return;
             try {
               await remove({ data: { id: set.id } });
               onChange();
@@ -167,9 +170,9 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
   return (
     <Sheet title={<span translate="no">{set.name}</span>} label={set.name} onClose={onClose} actions={edit || local ? (
       <Menu disabled={!!busy} items={[
-        edit && { label: "名前を変える", onClick: () => { const n = prompt("セットの新しい名前", set.name); if (n && n !== set.name) run("rename", () => rename({ data: { id: set.id, name: n } })); } },
+        edit && { label: "名前を変える", onClick: async () => { const n = await promptDialog({ title: "名前を変える", placeholder: "セットの新しい名前", value: set.name, max: 60 }); if (n && n !== set.name) run("rename", () => rename({ data: { id: set.id, name: n } })); } },
         local && set.items.length > 0 && { label: "zip でダウンロード(保存した版から)", onClick: () => { downloadZip(plan, { setId: set.id }).catch((e) => setError(message(e))); } },
-        edit && { label: "セットを消す", danger: true, onClick: () => { if (confirm(`セット「${set.name}」を消しますか?(ライブラリとサーバーはそのままです)`)) run("remove", async () => { await remove({ data: { id: set.id } }); onClose(); }); } },
+        edit && { label: "セットを消す", danger: true, onClick: async () => { if ((await confirmDialog({ message: `セット「${set.name}」を消しますか?(ライブラリとサーバーはそのままです)`, ok: "消す", danger: true }))) run("remove", async () => { await remove({ data: { id: set.id } }); onClose(); }); } },
       ]} />
     ) : undefined}>
       <div className="gtitle">{`中身(${set.items.length} 件)`}</div>
@@ -186,7 +189,7 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
             <AddonIcon type={i.projectType} url={i.iconUrl} />
             <span className="mid">
               <span className="ttl" translate="no">{i.title}</span>
-              <span className="sub">{TYPE_LABEL[i.projectType] ?? i.projectType} · {isSource(i.source) ? SOURCE_LABEL[i.source] : i.source}{i.versionId && <> · <b translate="no">{i.versionNumber}</b></>}</span>
+              <span className="sub">{TYPE_LABEL[i.projectType] ?? i.projectType} · {sourceLabel(i.source)}{i.versionId && <> · <b translate="no">{i.versionNumber}</b></>}</span>
             </span>
             {edit && i.source !== "spigot" && <Pin setId={set.id} item={i} disabled={!!busy} onDone={onChange} />}
             {edit && <Btn kind="red" sm disabled={!!busy} onClick={() => run(i.id, () => toggle({ data: { id: set.id, itemId: i.id, add: false } }))}>外す</Btn>}
@@ -213,8 +216,8 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
           {set.servers.map((s) => (
             <div className="row" key={s.id}>
               <span className="mid"><span className="ttl" translate="no">{s.name}</span><span className="sub">結び付けています</span></span>
-              <Btn kind="tint" sm disabled={!!busy} onClick={() => {
-                if (confirm(`「${s.name}」を「${set.name}」にそろえますか?(足りないものも入れる)`)) run("sync", async () => setResults({ server: s.name, verb: "そろえた", list: await sync({ data: { serverId: s.id, mode: "add" } }) }));
+              <Btn kind="tint" sm disabled={!!busy} onClick={async () => {
+                if ((await confirmDialog({ message: `「${s.name}」を「${set.name}」にそろえますか?(足りないものも入れる)`, ok: "そろえる" }))) run("sync", async () => setResults({ server: s.name, verb: "そろえた", list: await sync({ data: { serverId: s.id, mode: "add" } }) }));
               }}>そろえる</Btn>
             </div>
           ))}
@@ -388,7 +391,7 @@ function Schedule({ editable }: { editable: boolean }) {
 
   return (
     <>
-      <div className="gtitle">曜日と時刻<Info>決めた曜日・時刻に、セットを結び付けたすべてのサーバーをそろえる(足りないものを入れ、新しい版があれば更新する)か、何も変えずに更新があるかを確かめます。結果は「チーム」→「操作の記録と Discord への通知」に残り、Discord の「予約の結果」を選んでいれば知らせます。決められるのは管理者以上です。サーバーごとの予約(毎日・毎週・変えたら再起動)は、それぞれのサーバーの画面で決められます。</Info></div>
+      <div className="gtitle">曜日と時刻<Info>決めた曜日・時刻に、セットを結び付けたすべてのサーバーをそろえる(足りないものを入れ、新しい版があれば更新する)か、何も変えずに更新があるかを確かめます。結果は設定の「操作の記録と通知」に残り、Discord の「予約の結果」を選んでいれば知らせます。決められるのは管理者以上です。サーバーごとの予約(毎日・毎週・変えたら再起動)は、それぞれのサーバーの画面で決められます。</Info></div>
       <section className="group form">
         <label className="row">
           <span>予約を使う</span>
@@ -442,7 +445,7 @@ function FromModpack({ onCreated, servers }: { onCreated: () => void; servers: {
   };
   return (
     <>
-      <div className="gtitle">Modpack から作る<Info>Modpack に入っている Mod をライブラリに載せ、Modpack の名前のセットを作ります。Modrinth のものはファイルの中身(SHA-1)で探し、CurseForge のものは「チーム」で API キーを設定すると読めます。設定ファイル(overrides)は、サーバーを選んだときだけ、そのサーバーに書き込みます(テキストの設定ファイルだけ。上書きする前の中身は履歴に残ります。管理者以上)。</Info></div>
+      <div className="gtitle">Modpack から作る<Info>Modpack に入っている Mod をライブラリに載せ、Modpack の名前のセットを作ります。Modrinth のものはファイルの中身(SHA-1)で探し、CurseForge のものは設定の「CurseForge API キー」で API キーを設定すると読めます。設定ファイル(overrides)は、サーバーを選んだときだけ、そのサーバーに書き込みます(テキストの設定ファイルだけ。上書きする前の中身は履歴に残ります。管理者以上)。</Info></div>
       <section className="group">
         {servers.length > 0 && (
           <div className="row">
