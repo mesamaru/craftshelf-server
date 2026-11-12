@@ -122,6 +122,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - 種類(プラグイン・Mod): Modrinth は、Fabric などにも対応したプラグインを `project_type: "mod"` と返すので、ライブラリに足すときは探したときの種類、入れたときは入れたサーバーの種類で決める。
 - 「前の版に戻す」: `installInto` が更新で入れ替えた版を表 `install_history` に残す(1 つにつき 10 件)。`rollback` はいちばん新しい前の版を `fileById`(Modrinth は `/version/<ID>`、CurseForge は `/files/<ID>`、アップロードは版の行)で取り直して入れ、使った記録と戻す前の版の記録を消し、`server_hold` を付ける。SpigotMC は古い版を取ってこられないので戻せない。
 - 前提: Modrinth の版の `dependencies` のうち `required` のもの(CurseForge は `relationType: 3`)を `FileChoice.deps` で返し、同じ配布元から、`installInto` がまだ入っていないものを入れる(2 段まで。入れられなくても本体はそのまま)。
+- 手で置いた jar の前提不足(`unmetOf`。03.69.04 でプラグイン、03.77.00 で Mod も): jar の説明ファイルを 1 回だけ読み(`jarMeta`。場所と大きさが同じなら覚えた結果を使う)、必須の前提(plugin.yml の `depend`・paper-plugin.yml の必須・fabric.mod.json / quilt.mod.json の `depends`〔quilt の optional・クライアントだけの Mod は除く〕・mods.toml の `mandatory = true` / `type = "required"`〔`side = "CLIENT"` は除く〕)を、入っている jar(無効にしたものを除く)全部の「提供する名前」(自分の id・`provides`・jar の中の jar〔`META-INF/jars/`・`jarjar/`。Fabric API の部品など。2 段まで〕の id)と突き合わせる。minecraft・java・fabricloader・forge・neoforge・fml・javafml・lowcodefml・mixinextras は前提にしない(`BUILT_IN`)。recommends・suggests・breaks・conflicts は見ない。バージョンの範囲は見ない(あるかだけ)。Fabric API の jar の中の jar を読めなかったときは、fabric-api が入っていれば fabric-api-base・fabric-*-v1 を入っているとみなす。jar が 100 個を超えるときは Mod の前提を確かめない(全部を読めず、誤って出すので)。Mod の前提の id が Modrinth の slug と同じ Mod なら `install` を付けて「入れる」を出す(10 分覚える)。
 - 「セットに無いものを外す」(`sync` の `removeExtra`)は、`installed_mod` の記録があるもの(このアプリで入れたもの)のうち、セットに無いものだけを外す。手で置いたファイルは記録が無いので触らない。予約では外さない(気づかないうちに消えないように)。
 - そろえ方(03.55.00 から、「ほかのサーバーにそろえる」と同じ 3 通り): `sync` の `how` が `update`(`applyTo` の `update`。入っているものだけ新しい版に)/ `add`(既定。足りないものも入れる)/ `mirror`(さらにセットに無いものを外す = 前の `removeExtra: true`)。画面ではそろえる元に、結び付けたセットかほかのサーバー(`copy`)を選ぶ。
 - セットの前提(`missingDeps`、03.55.00 から): セットの Modrinth・CurseForge のもののうち、選んだサーバーの種類に合うものの `latestFile` の `deps` を見て、セットに無いものを、使うものの名前と一緒に返す。`addDeps`(`library: ["edit"]`)はライブラリに載せて(種類は選んだサーバーの種類)セットに足す。
@@ -203,7 +204,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 ## アップロードしたアドオン(自分用の版だけ)
 
 - 「ファイルは利用者側だけに置く」の方針に合わせ、自分用の版(利用者のサーバー機)でだけ受け付ける。サービス版では使えない(`deps.local` が無い)。
-- ライブラリの項目は `source = "upload"`(`project_id` はこのアプリが作る ID)。版は表 `library_file`(保存先・中の場所・大きさ・SHA-256・版・動くサーバーの種類)。同じ種類で名前が同じなら同じ項目の新しい版、同じ SHA-256 は 2 度入れない。
+- ライブラリの項目は `source = "upload"`(`project_id` はこのアプリが作る ID)。版は表 `library_file`(保存先・中の場所・大きさ・SHA-256・版・動くサーバーの種類)。同じ種類で名前が同じなら同じ項目の新しい版、同じ SHA-256 は 2 度入れない。版の出どころは `library_file.origin`(03.76.00 から。upload = 画面・API のアップロード、server = サーバーにあった jar を「ライブラリに取り込む」で取り込んだ、upstream = 配布元から保存した、v02 = v02 から取り込んだ、"" = それより前の行で今までの表示のまま。画面の言葉は `src/lib/origin.ts` の 1 か所)。
 - jar は `src/server/jar.ts` で、zip の目次から説明ファイルだけを取り出して読む(展開しない。1 ファイル 1 MB まで)。
 - 保存先のあいだで移す(`moveFiles`、管理者以上): 1 つずつ、移した先に書いて読み直し、SHA-256 が合えば `target_id` を書き換えてから元を消す。合わない・失敗したものは元に残す。
 - 保存先(表 `storage_target`。設定は `seal` で暗号化): パネルの中(既定、`/data/v03/library`)・フォルダ・WebDAV・SMB。SMB は `node-smb2`(SMB 2.0・2.1、NTLMv2 に固定)で、1 回の操作ごとにつないで切る。通信への署名・SMB 3 には対応していないので、それを必須にしている相手はマウントしてフォルダとして使う。中の場所は `<種類>/<名前>/<ID の頭>-<ファイル名>`。保存先を切り替えても、いままでのファイルは元の保存先のまま(`target_id`)。ファイルが残っている保存先は消せない。

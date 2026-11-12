@@ -188,6 +188,7 @@ export const EN: Record<string, string> = {
   "テスト版": "test version",
   // API の説明・トークンの範囲・処理の一覧・見た目のテーマ・ホーム画面に追加(03.57.00)
   "サーバーの種類(platform: paper・fabric など)と Minecraft のバージョン(mcVersion)を設定する": "Set the server type (platform: paper, fabric, etc.) and Minecraft version (mcVersion)",
+  "権限のあるサーバーすべての状態を 1 回で(id → 状態。つながらないサーバーは理由の文。ids にサーバーの ID をカンマで区切ると絞れる。外への問い合わせは同時に 8 つまで・5 秒は覚えた結果)": "Status of every server you can use, in one call (id → status; a server that cannot be reached gets a reason string; ids = server IDs separated by commas to narrow it; at most 8 outside requests at a time, results kept for 5 seconds)",
   "サーバーの状態(動いているか・CPU・メモリ・ping: 人数・名前の一部・応答の速さ)": "Server status (running or not, CPU, memory; ping: players, some names, latency)",
   "最近のログ(logs/latest.log の最後の行。lines で 20〜1000 行)": "Recent log (last lines of logs/latest.log; lines: 20–1000)",
   "サーバー本体の今のビルドと、いちばん新しいビルド": "Current and newest build of the server software",
@@ -223,7 +224,7 @@ export const EN: Record<string, string> = {
   "前の版に戻す(source、projectId。戻したものは更新を止める)": "Roll back to the previous version (source, projectId; rolled-back items are held)",
   "このサーバーで入れた・更新した・外したものの履歴": "History of what was installed, updated or removed on this server",
   "履歴の変更を元に戻す": "Undo a change in the history",
-  "入っているものの必須の前提で、このサーバーに無いもの(配布元に問い合わせる)": "Required dependencies of installed items that this server lacks (asks the sources)",
+  "入っているものの必須の前提で、このサーバーに無いもの(配布元に問い合わせる)。unmet は手で置いた jar の前提(プラグインの depend・Mod の depends・mods.toml の必須の前提。入っている jar の提供する名前と突き合わせる。バージョンの範囲は見ない)で、Mod の前提の id が Modrinth の slug と同じなら install(入れる先)が付く": "Required dependencies of installed items that this server lacks (asks the sources). unmet = prerequisites of hand-placed jars (plugin depend, Mod depends, required entries in mods.toml; matched against the names the installed jars provide; version ranges are not checked); if a Mod prerequisite id equals a Modrinth slug, install (where to install it from) is attached",
   "このサーバーの構成を、ほかのサーバーにそろえる(to: サーバーの ID の配列、mode: update / add / mirror)": "Copy this server's setup to other servers (to: array of server IDs, mode: update / add / mirror)",
   "自動更新を入れる・やめる(enabled: true / false)": "Turn auto update on or off (enabled: true / false)",
   "サーバーにセットを結び付ける(setId。null で外す)": "Bind a set to the server (setId; null unbinds)",
@@ -504,8 +505,8 @@ export const EN: Record<string, string> = {
   "そろえる元のサーバーに、このアプリで入れたもの(無効にしたものは除く)と同じ版を入れます。「まったく同じにする」は、そろえる元に無いもの(このアプリで入れたもの)を外します。「更新を止める」にしたもの・無効にしたものは変えません。外したもの・入れ替えたものは「変更の履歴」から元に戻せます。":
     "Installs the same versions as the add-ons installed by this app on the source server (except disabled ones). “Make identical” also removes items (installed by this app) that the source does not have. Paused and disabled items are not changed. Removed and replaced items can be undone from the change history.",
   "ライブラリに無いもの(配布元はわかっています)": "Not in the library (source known)",
-  "入っているもの・ライブラリに無いものを押すと、無効にする(消さずに止める)・有効にする・ライブラリに取り込むもできます。配布元のわからないものは、ファイルの中身から探し、見つからなければアップロードしたものとして取り込みます(自分用の版)。":
-    "Click an installed item or one not in the library to disable it (stop without deleting), enable it, or import it to the library. For unknown items, the source is looked up from the file contents; if none is found, it is imported as an upload (self-hosted edition).",
+  "入っているもの・ライブラリに無いものを押すと、無効にする(消さずに止める)・有効にする・ライブラリに取り込むもできます。配布元のわからないものは、ファイルの中身から探し、見つからなければ、サーバーから取り込んだものとしてライブラリに載せます(自分用の版)。":
+    "Click an installed item or one not in the library to disable it (stop without deleting), enable it, or import it to the library. For unknown items, the source is looked up from the file contents; if none is found, it is added to the library as imported from the server (self-hosted edition).",
   "版を変える・無効にする・外す": "Change version, disable or remove",
   "ライブラリに取り込む・無効にする・外す": "Import to library, disable or remove",
   "すでに有効です": "Already enabled",
@@ -976,6 +977,8 @@ export const EN: Record<string, string> = {
   "アカウントの設定": "Account settings",
   "アカウントを作る": "Create an account",
   "アップロード": "Upload",
+  "サーバーから取り込み": "Imported from server",
+  "v02 から": "From v02",
   "アップロードしたものは、「ファイルをアップロード」から足してください": "Add uploaded items with “Upload files”",
   "アップロードしたアドオンの保存先": "Storage for uploaded add-ons",
   "アップロードしたアドオンは、自分用の版だけで使えます": "Uploaded add-ons are available only in the self-hosted edition",

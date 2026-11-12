@@ -16,6 +16,7 @@ const num = (v: unknown, d: number) => (typeof v === "number" ? v : typeof v ===
 export const ROUTES: Route[] = [
   // サーバー
   { method: "GET", path: "/servers", scope: "read", summary: "サーバーの一覧", handler: (s, h) => s.servers.listServers(h) },
+  { method: "GET", path: "/servers/statuses", scope: "read", summary: "権限のあるサーバーすべての状態を 1 回で(id → 状態。つながらないサーバーは理由の文。ids にサーバーの ID をカンマで区切ると絞れる。外への問い合わせは同時に 8 つまで・5 秒は覚えた結果)", handler: (s, h, _p, b) => s.servers.statuses(h, str(b.ids) ? str(b.ids).split(",").filter(Boolean).slice(0, 200) : undefined) },
   { method: "GET", path: "/servers/:id", scope: "read", summary: "サーバーの名前・種類・バージョン", handler: (s, h, [id]) => s.library.detail(h, id) },
   { method: "POST", path: "/servers/:id/profile", scope: "admin", summary: "サーバーの種類(platform: paper・fabric など)と Minecraft のバージョン(mcVersion)を設定する", example: { platform: "paper", mcVersion: "1.21.4" }, handler: (s, h, [id], b) => s.library.setProfile(h, id, { platform: str(b.platform), mcVersion: str(b.mcVersion) }) },
   { method: "GET", path: "/servers/:id/status", scope: "read", summary: "サーバーの状態(動いているか・CPU・メモリ・ping: 人数・名前の一部・応答の速さ)", handler: (s, h, [id]) => s.servers.status(h, id) },
@@ -40,7 +41,7 @@ export const ROUTES: Route[] = [
   { method: "POST", path: "/servers/:id/addons/rollback", scope: "library", summary: "前の版に戻す(source、projectId。戻したものは更新を止める)", example: { source: "modrinth", projectId: "P7dR8mSH" }, handler: (s, h, [id], b) => s.library.rollback(h, id, str(b.source) || "modrinth", str(b.projectId)) },
   { method: "GET", path: "/servers/:id/changes", scope: "read", summary: "このサーバーで入れた・更新した・外したものの履歴", handler: (s, h, [id]) => s.library.changes(h, id) },
   { method: "POST", path: "/servers/:id/changes/:changeId/undo", scope: "library", summary: "履歴の変更を元に戻す", example: {}, handler: (s, h, [id, c]) => s.library.undo(h, id, c) },
-  { method: "GET", path: "/servers/:id/deps", scope: "read", summary: "入っているものの必須の前提で、このサーバーに無いもの(配布元に問い合わせる)", handler: (s, h, [id]) => s.library.serverDeps(h, id) },
+  { method: "GET", path: "/servers/:id/deps", scope: "read", summary: "入っているものの必須の前提で、このサーバーに無いもの(配布元に問い合わせる)。unmet は手で置いた jar の前提(プラグインの depend・Mod の depends・mods.toml の必須の前提。入っている jar の提供する名前と突き合わせる。バージョンの範囲は見ない)で、Mod の前提の id が Modrinth の slug と同じなら install(入れる先)が付く", handler: (s, h, [id]) => s.library.serverDeps(h, id) },
   { method: "POST", path: "/servers/:id/copy", scope: "library", summary: "このサーバーの構成を、ほかのサーバーにそろえる(to: サーバーの ID の配列、mode: update / add / mirror)", example: { to: ["<サーバーの ID>"], mode: "add" }, handler: (s, h, [id], b) => s.sets.copy(h, id, ids(b.to), str(b.mode)) },
   { method: "POST", path: "/servers/:id/auto-update", scope: "library", summary: "自動更新を入れる・やめる(enabled: true / false)", example: { enabled: true }, handler: (s, h, [id], b) => s.sets.setAutoUpdate(h, id, b.enabled === true) },
   { method: "POST", path: "/servers/:id/set", scope: "library", summary: "サーバーにセットを結び付ける(setId。null で外す)", example: { setId: "<セットの ID>" }, handler: (s, h, [id], b) => s.sets.bind(h, id, str(b.setId) || null) },
