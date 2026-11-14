@@ -10,6 +10,7 @@ import { setService } from "./sets";
 import { eventService } from "./events";
 import { scheduleService } from "./schedule";
 import { fileService } from "./files";
+import { extractService } from "./extract";
 import { uploadService } from "./uploads";
 import { shareService } from "./shares";
 import { tokenService } from "./tokens";
@@ -184,6 +185,7 @@ async function build() {
   const events = eventService(deps);
   const schedules = scheduleService(deps, sets);
   const files = fileService(deps);
+  const extract = extractService(deps);
   const software = softwareService(deps);
   const backups = backupService(deps);
   const worlds = worldService(deps);
@@ -202,14 +204,16 @@ async function build() {
   const saved = savedService(deps);
   // 前の起動で途中だった処理(処理の一覧)は「中断」にする(リクエストを受ける前に)
   await jobs.recover().catch((e) => console.error("[処理の一覧] 途中だったものを片付けられませんでした:", e));
+  // 展開中のまま残った行(変更の履歴)は、中断にする。エージェントの展開は、状態を問い合わせて反映する(つながるのを待つので、起動は待たせない)
+  void extract.recover().catch((e) => console.error("[展開] 途中だったものを片付けられませんでした:", e));
 
   // パネルからの版の切り替え(自分用の版だけ。サービス版は Docker のイメージで入れ替える)
   const versions = env.mode === "self" ? versionService({ fetch: safeFetch, dataDir: env.dataDir }) : null;
   versions?.confirmStarted();
   // 自動アップデートと「この更新の前に戻す」(自分用の版だけ)
   const updates = versions ? updateService(deps, versions, backups) : null;
-  return { env, db, mailer, auth, hub, servers, library, sets, events, schedules, files, software, backups, worlds, modpacks, teams, agents, telemetry, uploads, shares, tokens, ports, versions, updates, jobs, prefs, saved };
+  return { env, db, mailer, auth, hub, servers, library, sets, events, schedules, files, extract, software, backups, worlds, modpacks, teams, agents, telemetry, uploads, shares, tokens, ports, versions, updates, jobs, prefs, saved };
 }
 type Instance = Awaited<ReturnType<typeof build>>;
 const once = globalThis as { __craftshelf?: Promise<Instance> };
-export const { env, db, mailer, auth, hub, servers, library, sets, events, schedules, files, software, backups, worlds, modpacks, teams, agents, telemetry, uploads, shares, tokens, ports, versions, updates, jobs, prefs, saved } = await (once.__craftshelf ??= build());
+export const { env, db, mailer, auth, hub, servers, library, sets, events, schedules, files, extract, software, backups, worlds, modpacks, teams, agents, telemetry, uploads, shares, tokens, ports, versions, updates, jobs, prefs, saved } = await (once.__craftshelf ??= build());
