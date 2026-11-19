@@ -5,10 +5,11 @@ import { ApplyResults } from "~/lib/apply-results";
 import { libraryCatalog, libraryItemVersions } from "~/lib/library-api";
 import { uploadedFiles } from "~/lib/uploads-api";
 import { getSchedule, setSchedule } from "~/lib/schedule-api";
-import { ITEM_TYPES, PLATFORMS, PLATFORM_IDS } from "~/lib/platforms";
+import { ITEM_TYPES, PLATFORMS, PLATFORM_IDS, mcRange } from "~/lib/platforms";
+import { localDate } from "~/lib/format";
 import { AddonIcon } from "~/lib/type-icon";
 import { addSetDeps, applySet, createSet, listSets, pinSetItem, removeSet, renameSet, setMissingDeps, syncServerSet, toggleSetItem } from "~/lib/sets-api";
-import { Btn, Chip, Info, Menu, Sheet } from "~/lib/ui";
+import { Btn, Chip, Icon, Info, Menu, Sheet, fmtSize } from "~/lib/ui";
 import { sourceLabel } from "~/lib/sources";
 import { useCan } from "~/lib/use-can";
 import { sharedLocalEnabled } from "~/lib/servers-api";
@@ -17,6 +18,7 @@ import { MobileSearch, StoragePill } from "~/lib/shell";
 import { downloadZip } from "~/lib/zip-download";
 import { pageTitle } from "~/lib/titles";
 import { confirmDialog, promptDialog } from "~/lib/dialog-queue";
+import { jobsChanged } from "~/lib/jobs-ui";
 
 export const Route = createFileRoute("/sets")({
   beforeLoad: ({ context }) => {
@@ -147,6 +149,8 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
   const [error, setError] = useState("");
   const [results, setResults] = useState<{ server: string; verb: string; list: Result } | null>(null);
   const [type, setType] = useState(""); // 種類での絞り込み(空 = すべて)
+  const [pinning, setPinning] = useState<string | null>(null); // 版を選ぶ欄を開いているアイテム
+  const [adding, setAdding] = useState(set.items.length === 0); // ライブラリから選ぶ欄(中身が空なら初めから開く)
   const inSet = new Set(set.items.map((i) => i.id));
   const fits = (i: { projectType: string }) => !type || i.projectType === type;
   const addable = catalog.items.filter((i) => !inSet.has(i.id) && fits(i));
@@ -184,30 +188,32 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
       )}
       <section className="group">
         {set.items.length === 0 && <div className="row muted">まだ何も入っていません。{edit && catalog.items.length === 0 ? "先にライブラリに Mod・プラグインを登録すると、ここに足せます。" : ""}</div>}
-        {set.items.filter(fits).map((i) => (
+        {set.items.filter(fits).map((i) => [
           <div className="row" key={i.id}>
             <AddonIcon type={i.projectType} url={i.iconUrl} />
             <span className="mid">
               <span className="ttl" translate="no">{i.title}</span>
-              <span className="sub">{TYPE_LABEL[i.projectType] ?? i.projectType} · {sourceLabel(i.source, i.origin)}{i.versionId && <> · <b translate="no">{i.versionNumber}</b></>}</span>
+              <span className="sub">{sourceLabel(i.source, i.origin)} · {i.versionId ? <><b translate="no">{i.versionNumber}</b> に固定</> : "いつも新しい版"}</span>
             </span>
-            {edit && i.source !== "spigot" && <Pin setId={set.id} item={i} disabled={!!busy} onDone={onChange} />}
+            {edit && i.source !== "spigot" && (
+              <button className="trail link" type="button" disabled={!!busy} aria-expanded={pinning === i.id} onClick={() => setPinning(pinning === i.id ? null : i.id)}>
+                {pinning === i.id ? "閉じる" : i.versionId ? "版を変える" : "版を選ぶ"}
+              </button>
+            )}
             {edit && <Btn kind="red" sm disabled={!!busy} onClick={() => run(i.id, () => toggle({ data: { id: set.id, itemId: i.id, add: false } }))}>外す</Btn>}
-          </div>
-        ))}
-        {edit && addable.length > 0 && (
-          <div className="row">
-            <span>ライブラリから足す</span>
-            <select className="trail" value="" disabled={!!busy} aria-label={`${set.name} にライブラリから足す`}
-              onChange={(e) => { const itemId = e.target.value; if (itemId) run(itemId, () => toggle({ data: { id: set.id, itemId, add: true } })); }}>
-              <option value="">選んでください…</option>
-              {addable.map((i) => <option key={i.id} value={i.id} translate="no">{i.title}({TYPE_LABEL[i.projectType] ?? i.projectType})</option>)}
-            </select>
-          </div>
+          </div>,
+          pinning === i.id && <PinPanel key={`pin-${i.id}`} setId={set.id} item={i} onDone={onChange} onClose={() => setPinning(null)} />,
+        ])}
+        {edit && addable.length > 0 && !adding && (
+          <button className="row link" type="button" disabled={!!busy} onClick={() => setAdding(true)}>{`＋ ライブラリから足す(${addable.length} 件から選ぶ)`}</button>
         )}
       </section>
+      {edit && addable.length > 0 && adding && (
+        <AddPicker items={addable} busy={!!busy} onClose={() => setAdding(false)}
+          onAdd={(ids) => run("add", async () => { for (const itemId of ids) await toggle({ data: { id: set.id, itemId, add: true } }); setAdding(false); })} />
+      )}
       {set.items.some((i) => i.source === "modrinth" || i.source === "curseforge") && <>
-        <div className="gtitle">前提</div>
+        <div className="gtitle">前提<Info>セットの Mod・プラグインが必要とするもの(Modrinth・CurseForge の「必須」)のうち、セットに入っていないものを探します。必要なものはサーバーの種類で変わるので、入れる先の種類を選んでから確かめます。</Info></div>
         <section className="group"><Deps set={set} edit={edit} onChange={onChange} /></section>
       </>}
       {edit && set.items.length > 0 && <>
@@ -215,25 +221,26 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
         <section className="group">
           {set.servers.map((s) => (
             <div className="row" key={s.id}>
-              <span className="mid"><span className="ttl" translate="no">{s.name}</span><span className="sub">結び付けています</span></span>
+              <span className="mid"><span className="ttl" translate="no">{s.name}</span><span className="sub">このセットに結び付けています</span></span>
               <Btn kind="tint" sm disabled={!!busy} onClick={async () => {
-                if ((await confirmDialog({ message: `「${s.name}」を「${set.name}」にそろえますか?(足りないものも入れる)`, ok: "そろえる" }))) run("sync", async () => setResults({ server: s.name, verb: "そろえた", list: await sync({ data: { serverId: s.id, mode: "add" } }) }));
+                if ((await confirmDialog({ message: `「${s.name}」を「${set.name}」にそろえますか?(足りないものも入れる)`, ok: "そろえる" }))) run("sync", async () => { jobsChanged(); setResults({ server: s.name, verb: "そろえた", list: await sync({ data: { serverId: s.id, mode: "add" } }) }); });
               }}>そろえる</Btn>
             </div>
           ))}
-          <div className="row">
-            <span>サーバーに入れる</span>
-            {targets.length ? (
-              <select className="trail" value="" disabled={!!busy} aria-label={`${set.name} をサーバーに入れる`}
-                onChange={(e) => {
-                  const s = targets.find((x) => x.id === e.target.value);
-                  if (s) run("apply", async () => setResults({ server: s.name, verb: "入れた", list: await apply({ data: { id: set.id, serverId: s.id } }) }));
-                }}>
-                <option value="">サーバーを選ぶ…</option>
-                {targets.map((s) => <option key={s.id} value={s.id} translate="no">{s.name}</option>)}
-              </select>
-            ) : <span className="trail muted">{set.servers.length ? "ほかに種類を決めたサーバーはありません" : "種類を決めたサーバーがありません"}</span>}
-          </div>
+          {targets.map((t) => (
+            <div className="row" key={t.id}>
+              <span className="mid">
+                <span className="ttl" translate="no">{t.name}</span>
+                <span className="sub">{[t.type === "mod" ? "Mod のサーバー" : "プラグインのサーバー", t.mc && `Minecraft ${t.mc}`].filter(Boolean).join(" · ")}</span>
+              </span>
+              <Btn kind="tint" sm disabled={!!busy} onClick={async () => {
+                if (await confirmDialog({ message: `「${t.name}」に「${set.name}」を入れますか?(まだ入っていないものだけを入れます。入っているものはそのままです)`, ok: "入れる" })) {
+                  run("apply", async () => { jobsChanged(); return setResults({ server: t.name, verb: "入れた", list: await apply({ data: { id: set.id, serverId: t.id } }) }); });
+                }
+              }}>入れる</Btn>
+            </div>
+          ))}
+          {!targets.length && !set.servers.length && <div className="row muted">入れられるサーバーがありません(サーバーの画面で、サーバーの種類を決めると出ます)。</div>}
           {(busy === "apply" || busy === "sync") && <div className="row muted">サーバーに入れています…</div>}
           {results && <ApplyResults server={results.server} verb={results.verb} list={results.list} />}
         </section>
@@ -243,39 +250,104 @@ function SetSheet({ set, catalog, edit, local, onChange, onClose }: { set: SetRo
   );
 }
 
-// セットのアイテムの版を固定する・やめる(版の一覧は、押したときに配布元から読む)
-function Pin({ setId, item, disabled, onDone }: { setId: string; item: SetRow["items"][number]; disabled: boolean; onDone: () => void }) {
+// ライブラリから選んでセットに足す: 名前で探し、アイコン・種類・配布元を見て、チェックしたものをまとめて足す
+function AddPicker({ items, busy, onAdd, onClose }: { items: Catalog["items"]; busy: boolean; onAdd: (ids: string[]) => void; onClose: () => void }) {
+  const [q, setQ] = useState("");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const word = q.trim().toLowerCase();
+  const shown = items.filter((i) => !word || i.title.toLowerCase().includes(word)).sort((a, b) => a.title.localeCompare(b.title));
+  const pick = (id: string) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  return (
+    <>
+      <div className="gtitle">ライブラリから足す</div>
+      <section className="group">
+        <div className="row sfilter pick-q">
+          <label className="q"><Icon name="search" /><input type="search" placeholder="名前で探す" aria-label="ライブラリのアイテムを名前で探す" value={q} onChange={(e) => setQ(e.target.value)} autoFocus /></label>
+        </div>
+        <div className="pick-list">
+          {shown.length === 0 && <div className="row muted">見つかりません。</div>}
+          {shown.map((i) => (
+            <label className="row click" key={i.id}>
+              <input type="checkbox" className="ck" checked={picked.has(i.id)} disabled={busy} onChange={() => pick(i.id)} />
+              <AddonIcon type={i.projectType} url={i.iconUrl} />
+              <span className="mid">
+                <span className="ttl" translate="no">{i.title}</span>
+                <span className="sub">{TYPE_LABEL[i.projectType] ?? i.projectType} · {sourceLabel(i.source, i.origin)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        <div className="row pick-foot">
+          <span className="muted small">{picked.size ? `${picked.size} 件を選んでいます` : "足すものにチェックを入れます"}</span>
+          <span className="grow" />
+          <Btn sm disabled={busy} onClick={onClose}>閉じる</Btn>
+          <Btn kind="pri" sm disabled={busy || picked.size === 0} onClick={() => onAdd([...picked])}>{busy ? "足しています…" : `${picked.size || ""} 件を足す`.trim()}</Btn>
+        </div>
+      </section>
+    </>
+  );
+}
+
+// セットのアイテムの版を固定する欄(アイテムの行の下に開く): 「いつも新しい版」と、配布元の版(新しい順)・アップロードした版を並べ、
+// 選んで「この版にする」。版の一覧は、開いたときに配布元から読む
+function PinPanel({ setId, item, onDone, onClose }: { setId: string; item: SetRow["items"][number]; onDone: () => void; onClose: () => void }) {
   const versions = useServerFn(libraryItemVersions);
   const uploads = useServerFn(uploadedFiles);
   const pin = useServerFn(pinSetItem);
-  const [list, setList] = useState<{ id: string; label: string }[] | null>(null);
+  const [list, setList] = useState<{ id: string; label: string; sub: string; tag?: string }[] | null>(null);
+  const [sel, setSel] = useState(item.versionId ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const run = async (fn: () => Promise<unknown>) => {
+  useEffect(() => {
+    const load = item.source === "upload"
+      ? uploads({ data: { itemId: item.id } }).then((fs) => fs.map((f) => ({ id: f.id, label: f.version || f.filename, sub: [localDate(f.createdAt), fmtSize(f.size)].join(" · ") })))
+      : versions({ data: { itemId: item.id } }).then((vs) => vs.map((v) => ({ id: v.versionId, label: v.versionNumber, tag: V_TYPE[v.type],
+        sub: [loaderNames(v.loaders), v.mcVersions.length ? `MC ${mcRange(v.mcVersions)}` : "", v.date ? localDate(v.date) : ""].filter(Boolean).join(" · ") })));
+    load.then((l) => setList(item.versionId && !l.some((v) => v.id === item.versionId) ? [{ id: item.versionId, label: item.versionNumber ?? "", sub: "いま固定している版" }, ...l] : l),
+      (e) => setError(message(e)));
+  }, [item.id]);
+  const save = async () => {
     setBusy(true);
     setError("");
     try {
-      await fn();
+      await pin({ data: { id: setId, itemId: item.id, versionId: sel || null } });
+      onDone();
+      onClose();
     } catch (e) {
       setError(message(e));
-    } finally {
       setBusy(false);
     }
   };
-  const open = () => run(async () => setList(item.source === "upload"
-    ? (await uploads({ data: { itemId: item.id } })).map((f) => ({ id: f.id, label: f.version || f.filename }))
-    : (await versions({ data: { itemId: item.id } })).map((v) => ({ id: v.versionId, label: v.mcVersions.length ? `${v.versionNumber}(${v.mcVersions.slice(0, 3).join("・")})` : v.versionNumber }))));
-  if (error) return <span className="trail error small" role="alert">{error}</span>;
-  if (!list) return <button className="trail link" type="button" disabled={disabled || busy} onClick={open}>{busy ? "読み込んでいます…" : "版を選ぶ"}</button>;
+  const choice = (id: string, label: string, sub: string, tag?: string) => (
+    <button key={id || "latest"} type="button" className={`row link vrow${sel === id ? " sel" : ""}`} role="radio" aria-checked={sel === id} disabled={busy} onClick={() => setSel(id)}>
+      <span className="vdot" aria-hidden="true" />
+      <span className="mid">
+        <span className="ttl"><span translate={id ? "no" : undefined}>{label}</span>{tag && <span className="tag">{tag}</span>}{id && id === item.versionId && <span className="tag">いまの固定</span>}</span>
+        {sub && <span className="sub">{sub}</span>}
+      </span>
+    </button>
+  );
+  const changed = sel !== (item.versionId ?? "");
   return (
-    <select className="trail" value={item.versionId ?? ""} disabled={disabled || busy} aria-label={`${item.title} の版`}
-      onChange={(e) => run(async () => { await pin({ data: { id: setId, itemId: item.id, versionId: e.target.value || null } }); setList(null); onDone(); })}>
-      <option value="">いつも新しい版(固定しない)</option>
-      {item.versionId && !list.some((v) => v.id === item.versionId) && <option value={item.versionId} translate="no">{item.versionNumber}</option>}
-      {list.map((v) => <option key={v.id} value={v.id} translate="no">{v.label}</option>)}
-    </select>
+    <div className="row column pin-panel">
+      <div className="group vlist pin-list" role="radiogroup" aria-label={`${item.title} の版`}>
+        {choice("", "いつも新しい版(固定しない)", "新しい版が出たら、そろえるときにそれを入れます")}
+        {!list && !error && <div className="row muted">版を読み込んでいます…</div>}
+        {list?.length === 0 && <div className="row muted">選べる版がありません</div>}
+        {list?.map((v) => choice(v.id, v.label, v.sub, v.tag))}
+      </div>
+      {error && <p className="error small" role="alert">{error}</p>}
+      <span className="actions pin-foot">
+        <span className="grow" />
+        <Btn sm disabled={busy} onClick={onClose}>やめる</Btn>
+        <Btn kind="pri" sm disabled={busy || !changed} onClick={save}>{busy ? "変えています…" : sel ? "この版にする" : "固定をやめる"}</Btn>
+      </span>
+    </div>
   );
 }
+const V_TYPE: Record<string, string> = { beta: "ベータ", alpha: "アルファ" };
+// 動く作り(同じ版番号が Paper 向け・Bukkit 向けのように分かれていることがあるので、見分けられるように出す)
+const loaderNames = (ls: string[]) => ls.slice(0, 3).map((l) => l.charAt(0).toUpperCase() + l.slice(1)).join("・") + (ls.length > 3 ? " ほか" : "");
 
 // セットの前提(Modrinth・CurseForge の必須)のうち、セットに入っていないものを確かめて足す
 function Deps({ set, edit, onChange }: { set: SetRow; edit: boolean; onChange: () => void }) {
@@ -304,29 +376,34 @@ function Deps({ set, edit, onChange }: { set: SetRow; edit: boolean; onChange: (
   });
   return (
     <>
-      <div className="row">
-        <span>前提を確かめる</span>
-        <span className="trail actions">
-          <select value={platform} disabled={busy} aria-label="前提を確かめるサーバーの種類" onChange={(e) => { setPlatform(e.target.value); setR(null); }}>
-            {PLATFORM_IDS.map((k) => <option key={k} value={k}>{PLATFORMS[k].label}</option>)}
-          </select>
-          <button className="link" type="button" disabled={busy} onClick={recheck}>{busy && !r ? "確かめています…" : "確かめる"}</button>
-        </span>
-      </div>
-      {r && r.missing.length === 0 && <div className="row muted">前提はそろっています。</div>}
-      {r && r.missing.length > 0 && <div className="row error">{`前提が足りません(${r.missing.length} 件)`}</div>}
+      <label className="row">
+        <span>入れる先のサーバーの種類</span>
+        <select className="trail" value={platform} disabled={busy} aria-label="前提を確かめるサーバーの種類" onChange={(e) => { setPlatform(e.target.value); setR(null); }}>
+          {PLATFORM_IDS.map((k) => <option key={k} value={k}>{PLATFORMS[k].label}</option>)}
+        </select>
+      </label>
+      {!r && <button className="row link" type="button" disabled={busy} onClick={recheck}>{busy ? "確かめています…" : "前提を確かめる"}</button>}
+      {r && (
+        <div className="row">
+          {r.missing.length ? <span className="badge upd">{`足りない ${r.missing.length} 件`}</span> : <span className="badge ok">そろっています</span>}
+          <span className="grow" />
+          <button className="trail link" type="button" disabled={busy} onClick={recheck}>もう一度確かめる</button>
+        </div>
+      )}
       {r?.missing.map((m) => (
         <div className="row" key={`${m.source}:${m.projectId}`}>
-          <AddonIcon type={m.projectType} url={m.iconUrl} size="sm" />
-          <span className="main">
-            <span translate="no">{m.title}</span>
-            <span className="muted small"><span translate="no">{m.by.join("、")}</span> が使います</span>
+          <AddonIcon type={m.projectType} url={m.iconUrl} />
+          <span className="mid">
+            <span className="ttl" translate="no">{m.title}</span>
+            <span className="sub">{`「${m.by.join("」「")}」に必要です`}</span>
           </span>
-          {edit && <button className="trail link" type="button" disabled={busy} onClick={() => addSome([m])}>セットに足す</button>}
+          {edit && <Btn kind="tint" sm disabled={busy} onClick={() => addSome([m])}>＋ 足す</Btn>}
         </div>
       ))}
-      {edit && r && r.missing.length > 1 && <button className="row link" type="button" disabled={busy} onClick={() => addSome(r.missing)}>{`足りない ${r.missing.length} 件をすべて足す`}</button>}
-      {r?.errors.map((x) => <div className="row muted small" key={x} translate="no">{x}</div>)}
+      {edit && r && r.missing.length > 1 && (
+        <div className="row"><span className="grow" /><Btn kind="pri" sm disabled={busy} onClick={() => addSome(r.missing)}>{busy ? "足しています…" : `${r.missing.length} 件をすべて足す`}</Btn></div>
+      )}
+      {r && r.errors.length > 0 && <div className="row muted small" translate="no">{`確かめられなかったもの: ${r.errors.join("、")}`}</div>}
       {error && <p className="row error" role="alert">{error}</p>}
     </>
   );

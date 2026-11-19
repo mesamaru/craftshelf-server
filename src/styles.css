@@ -963,3 +963,28 @@ a:not([class]) { color: var(--link); text-underline-offset: 2px; text-decoration
 .upd-msg p { margin: 0; }
 .upd-foot { border-top: 1px solid var(--line); padding-top: 10px; }
 @media (max-width: 720px) { .upd-seg { width: 140px; } }
+/* セットに足す: 探す欄・一覧(長いときは中で流す)・下の決める行 */
+.pick-q { margin: 0; }
+.pick-list { max-height: min(46vh, 420px); overflow-y: auto; overscroll-behavior: contain; }
+.pick-foot { gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); }
+/* セットの版を選ぶ欄(アイテムの行の下に開く) */
+.pin-panel { background: var(--chip); gap: 8px; }
+.pin-list { margin: 0; max-height: min(44vh, 380px); overflow-y: auto; overscroll-behavior: contain; }
+.pin-foot { display: flex; gap: 8px; }
+/* 上のバーの「処理」のしるし */
+.rbtn.jobs.busy::after { content: ""; position: absolute; inset: 1px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); animation: jobs-spin 1s linear infinite; }
+@keyframes jobs-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .rbtn.jobs.busy::after { animation: none; border-color: var(--accent); } }
+.nb.run, .nb.ok { background: var(--accent); color: var(--accent-ink); }
+/* ストレージ: 保存先の行と、開いたときの中身 */
+.st-row .ttl .badge { vertical-align: 1px; }
+.st-detail { gap: 10px; background: var(--chip); }
+.st-status { display: flex; flex-direction: column; gap: 6px; }
+.st-space { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.st-space .meter { flex: 1; min-width: 120px; max-width: 320px; margin-top: 0; }
+.st-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.st-move { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.st-move select { flex: 1; min-width: 0; max-width: 280px; }
+.st-sub { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 4px; }
+.st-files { max-height: min(48vh, 420px); overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.st-files .row { padding-left: 0; padding-right: 0; }
