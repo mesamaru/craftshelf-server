@@ -229,7 +229,7 @@ function Passkeys() {
         <div className="row" key={p.id}>
           <span translate="no">{p.name || "パスキー"}</span>
           <button className="trail link" type="button" onClick={() => rename(p.id, p.name || "パスキー")}>名前を変える</button>
-          <button className="link danger" type="button" onClick={() => remove(p.id)}>削除</button>
+          <button className="link danger" type="button" onClick={() => remove(p.id)}>消す</button>
         </div>
       ))}
       <button className="row link" type="button" onClick={add}>パスキーを追加</button>
@@ -379,7 +379,7 @@ function Versions({ userId }: { userId: string }) {
               <ul>{notePoints(latest.notes).slice(0, 6).map((x, i) => <li key={i}>{x}</li>)}</ul>
               {newer.length > 1 && <span className="muted small">{`ほかに ${newer.length - 1} 個の版の変更も入ります`}</span>}
             </div>
-            <Btn kind="pri" className="upd-go" disabled={!!busy} onClick={() => update(latest.version)}>今すぐアップデート</Btn>
+            <Btn kind="pri" className="upd-go" disabled={!!busy} onClick={() => update(latest.version)}>いますぐアップデート</Btn>
           </>
         )}
         {(busy || error || info.listError) && (
@@ -489,7 +489,7 @@ function ApiTokens({ userId }: { userId: string }) {
       </section>
       <form className="group form" onSubmit={(e) => (e.preventDefault(), submit())}>
         <input className="row" placeholder="名前(使い道。例 毎朝の更新の確認)" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
-        <div className="row muted">範囲(読むことは、どのトークンでもできます)</div>
+        <div className="row column"><span className="small strong">できること</span><span className="muted small">読み取りは、どのトークンでもできます</span></div>
         {TOKEN_SCOPES.filter((x) => x !== "read" && allowed[x]).map((x) => (
           <label className="row" key={x}><span>{SCOPE_LABELS[x]}</span>
             <input className="trail switch" type="checkbox" checked={scopes.includes(x)} onChange={(e) => setScopes((v) => (e.target.checked ? [...v, x] : v.filter((y) => y !== x)))} /></label>
@@ -652,7 +652,8 @@ function Appearance() {
         <div className="row">
           <span>明るさ</span>
           {preset.tone ? (
-            <span className="trail">{preset.tone === "dark" ? "ダーク(テーマに合わせる)" : "ライト(テーマに合わせる)"}</span>
+            <span className="trail">{preset.tone === "dark" ? "ダーク(テーマに合わせる)" : "ライト(テーマに合わせる)"}
+              <button type="button" className="link small" onClick={() => change({ ...t, preset: "standard" })}>明るさを選ぶ</button></span>
           ) : (
             <select className="trail" value={t.mode} onChange={(e) => change({ ...t, mode: e.target.value as Mode })} aria-label="明るさ">
               <option value="auto">端末に合わせる</option>
