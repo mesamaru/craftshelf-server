@@ -7,15 +7,17 @@ import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, or, sql } fr
 import { ITEM_TYPES, PLATFORMS, MC_VERSION, LOADERS, type Platform, isItemType, isPlatform, kindsOf, mcClean, mcCovers, mcRange, supportOf, type Support } from "~/lib/platforms";
 import { installedMod, libraryItem, server, serverHold, serverProfile, user as userTable } from "./db/schema";
 import { HttpError, isHttpError, requireTeam } from "./guard";
-import { type Channel, type ItemSource, SOURCE_LABEL, isChannel, isItemSource, parseSourceUrl } from "~/lib/sources";
+import { type Channel, type ItemSource, SOURCE_LABEL, isChannel, isItemSource, parseSourceUrl, pluginOnly } from "~/lib/sources";
 import { ModrinthError, type ProjectType, type UpRow, modrinthClient } from "./modrinth";
 import { bestOf, mcLatest } from "./addon-versions";
 import { SpigetError, spigetClient } from "./spiget";
+import { HangarError, hangarClient, hangarPlatform } from "./hangar";
 import { CF_KEY, CurseForgeError, curseforgeClient } from "./curseforge";
 import { addonSetItem, installHistory, libraryDep, libraryFavorite, libraryFile, libraryTag, serverChange, serverSet, storageTarget, teamCurseforge, teamOption } from "./db/schema";
 import { hint, open, seal } from "./secrets";
 import { fileStore, uploadService } from "./uploads";
 import { type JarMeta, analyzeJar, jarMeta } from "./jar";
+import { type VersionRange, rangeText, satisfies } from "./dep-range";
 import { eventService } from "./events";
 import { jobService } from "./jobs";
 import { type Deps, remote, serverOf, serverScope, worldOf } from "./servers";
@@ -102,7 +104,7 @@ export async function fromSource<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    if (e instanceof ModrinthError || e instanceof SpigetError || e instanceof CurseForgeError) throw new HttpError(502, e.message);
+    if (e instanceof ModrinthError || e instanceof SpigetError || e instanceof CurseForgeError || e instanceof HangarError) throw new HttpError(502, e.message);
     throw e;
   }
 }
@@ -128,6 +130,7 @@ export function modTools(deps: Deps) {
   const { db } = deps;
   const modrinth = modrinthClient(deps.fetch);
   const spiget = spigetClient(deps.fetch);
+  const hangar = hangarClient(deps.fetch);
 
   const files = fileStore(deps);
   const local = !!deps.local;
@@ -177,9 +180,10 @@ export function modTools(deps: Deps) {
   type Selection = Awaited<ReturnType<typeof selection>>;
   /** 配布元の版(Minecraft のバージョンでは絞らず、それぞれに対応の印を付ける)。memo なら LATEST_MEMO.ms のあいだ覚える(版の一覧・更新の確かめ用。つながらなかった結果は覚えない) */
   async function upstreamRows(source: ItemSource, projectId: string, p: Profile, teamId: string, sel: Selection, memo = false): Promise<VRow[]> {
-    if (source === "upload" || (source === "spigot" && p.kind)) return [];
+    if (source === "upload" || (pluginOnly(source) && p.kind)) return [];
     const get = async (): Promise<UpRow[]> => {
       if (source === "spigot") return [await fromSource(() => spiget.latestFile(projectId, p.platform))].flatMap((f) => (f ? [f] : []));
+      if (source === "hangar") return fromSource(() => hangar.rows(projectId, p.platform, p.mcVersion));
       const cf = source === "curseforge" ? await curseforge(teamId) : null;
       return fromSource(() => (cf ? cf.rows(projectId, p.platform, p.mcVersion, sel.opts) : modrinth.rows(projectId, p.platform, sel.opts)));
     };
@@ -290,7 +294,7 @@ export function modTools(deps: Deps) {
       return i ? { title: i.title, slug: "", projectType: i.projectType, iconUrl: "" } : null;
     }
     const cf = source === "curseforge" ? await curseforge(teamId) : null;
-    return fromSource(() => (cf ? cf.project(projectId) : source === "spigot" ? spiget.project(projectId) : modrinth.project(projectId)));
+    return fromSource(() => (cf ? cf.project(projectId) : source === "spigot" ? spiget.project(projectId) : source === "hangar" ? hangar.project(projectId) : modrinth.project(projectId)));
   }
 
   async function profileOf(serverId: string) {
@@ -314,8 +318,9 @@ export function modTools(deps: Deps) {
     return row.id;
   }
 
-  // 決まった版のファイル(前の版に戻すとき)。SpigotMC は古い版を取ってこられないので null
-  async function fileById(source: ItemSource, projectId: string, versionId: string, teamId: string) {
+  // 決まった版のファイル(前の版に戻すとき)。SpigotMC は古い版を取ってこられないので null。
+  // platform は入れるサーバーの種類(Hangar は版のファイルが作りごとに分かれるので、それで選ぶ)
+  async function fileById(source: ItemSource, projectId: string, versionId: string, teamId: string, platform?: Platform) {
     if (source === "upload") {
       const [f] = await db.select().from(libraryFile).where(eq(libraryFile.id, versionId));
       return f ? { projectId, versionId: f.id, versionNumber: f.version || f.filename, filename: f.filename, url: "", sha512: "", size: f.size, upload: f, deps: [] as string[] } : null;
@@ -329,7 +334,7 @@ export function modTools(deps: Deps) {
     }
     const cf = source === "curseforge" ? await curseforge(teamId) : null;
     try {
-      const file = await fromSource(() => (cf ? cf.file(projectId, versionId) : modrinth.version(projectId, versionId)));
+      const file = await fromSource(() => (cf ? cf.file(projectId, versionId) : source === "hangar" ? hangar.version(projectId, versionId, platform) : modrinth.version(projectId, versionId)));
       if (file) return { ...file, upload: undefined };
     } catch (e) {
       const s = isHttpError(e) ? await files.savedOf(teamId, source, projectId, versionId) : null;
@@ -504,32 +509,45 @@ export function modTools(deps: Deps) {
   const FABRIC_PART = /^mod:fabric-(?:api-base|[a-z0-9-]+-v\d+)$/;
   /**
    * 手で置いた jar(このアプリの記録が無いもの)の、必須の前提(plugin.yml の depend・Mod の depends・mods.toml の mandatory)のうち、サーバーに入っていないもの。
-   * 入っているかは、入っている jar 全部の「提供する名前」(自分の id・provides・jar の中の jar の id)と突き合わせる。バージョンの範囲は見ない(あるかだけ)。
-   * Mod の前提の id が Modrinth の slug と同じなら、「入れる」ための情報(install)を付ける
-   * shortcut: バージョン範囲(>=0.5 など)は満たしているかまでは見ない。要るなら、provides に版も持たせて比べる。
-   * shortcut: Fabric API の jar の中の jar を読めなかったときは、fabric-api が入っていれば fabric-api-base・fabric-*-v1 は入っているとみなす
+   * 入っているかは、入っている jar 全部の「提供する名前」(自分の id・provides・jar の中の jar の id)と突き合わせる。
+   * Mod の前提に版の範囲(>=0.5・[1.0,2.0) など)があれば、提供する版が満たすかも見て、満たさなければ need(範囲)・have(入っている版)を付けて出す(dep-range.ts。版・範囲が読めなければ満たすとみなす)。
+   * Mod の前提の id が Modrinth の slug と同じなら、「入れる」ための情報(install)を付ける(版が合わないものには付けない)
+   * shortcut: Fabric API の jar の中の jar を読めなかったときは、fabric-api が入っていれば fabric-api-base・fabric-*-v1 は入っている(版も合う)とみなす。部品の版は jar の中の jar にしか無いので、読めないときは確かめようがない
    */
   async function unmetOf(target: Target, p: Profile) {
     const known = new Set((await db.select({ f: installedMod.filename }).from(installedMod).where(eq(installedMod.serverId, target.row.id))).map((r) => r.f));
     const metas = await metasIn(target, p);
     // jar が多すぎて全部は読めないとき、Mod の前提は誤って出さないよう確かめない(プラグインは今までどおり)
     const skipMods = metas.more > 0;
-    const have = new Set([...metas].filter(([f]) => !isDisabled(f)).flatMap(([, m]) => [m.key, ...m.provides]));
-    const partsRead = [...have].some((k) => /^mod:fabric-.+-v\d+$/.test(k));
-    const need = new Map<string, { name: string; by: string[] }>(); // 前提の見分ける名前 → 書いてあった名前と、使うもの
+    const have = new Map<string, string[]>(); // 提供する名前 → 版("" = 分からない)
+    for (const [f, m] of metas) {
+      if (isDisabled(f)) continue;
+      for (const x of m.provides.length ? m.provides : [{ key: m.key, version: "" }]) have.set(x.key, [...(have.get(x.key) ?? []), x.version]);
+    }
+    const partsRead = [...have.keys()].some((k) => /^mod:fabric-.+-v\d+$/.test(k));
+    // 前提の見分ける名前(版が合わないものは範囲も) → 書いてあった名前と、使うもの
+    const need = new Map<string, { key: string; name: string; by: string[]; range?: VersionRange }>();
     for (const [f, m] of metas) {
       if (known.has(f) || isDisabled(f)) continue;
       for (const d of m.depends.filter((x) => /^(plugin|velocity):/.test(x.key) || (!skipMods && x.key.startsWith("mod:")))) {
-        if (have.has(d.key) || (have.has("mod:fabric-api") && !partsRead && FABRIC_PART.test(d.key))) continue;
-        need.set(d.key, { name: d.name, by: [...(need.get(d.key)?.by ?? []), m.name || f] });
+        const vers = have.get(d.key);
+        if (!vers && have.has("mod:fabric-api") && !partsRead && FABRIC_PART.test(d.key)) continue;
+        if (vers && (!d.range || vers.some((v) => satisfies(v, d.range!)))) continue;
+        const k = vers ? `${d.key} ${rangeText(d.range!)}` : d.key;
+        need.set(k, { key: d.key, name: d.name, by: [...(need.get(k)?.by ?? []), m.name || f], ...(vers ? { range: d.range } : {}) });
       }
     }
     // 配布元から入れたもの(記録がある jar)も、中の名前で入っていると数える(説明ファイルの名前が、記録の名前と違うこともあるので)
     const titles = new Set((await db.select({ t: installedMod.title }).from(installedMod).where(eq(installedMod.serverId, target.row.id))).map((r) => `plugin:${r.t.toLowerCase()}`));
-    const out: { name: string; by: string[]; install?: NonNullable<Awaited<ReturnType<typeof modrinthMod>>> }[] = [];
-    for (const [key, d] of [...need].filter(([d]) => !titles.has(d))) {
-      const install = key.startsWith("mod:") ? await modrinthMod(key.slice(4)) : null;
-      out.push({ name: d.name, by: [...new Set(d.by)], ...(install ? { install } : {}) });
+    const out: { name: string; by: string[]; install?: NonNullable<Awaited<ReturnType<typeof modrinthMod>>>; need?: string; have?: string }[] = [];
+    for (const d of [...need.values()].filter((d) => !titles.has(d.key))) {
+      const by = [...new Set(d.by)];
+      if (d.range) {
+        out.push({ name: d.name, by, need: rangeText(d.range), have: [...new Set(have.get(d.key))].join(", ") });
+        continue;
+      }
+      const install = d.key.startsWith("mod:") ? await modrinthMod(d.key.slice(4)) : null;
+      out.push({ name: d.name, by, ...(install ? { install } : {}) });
     }
     return out;
   }
@@ -573,12 +591,12 @@ export function modTools(deps: Deps) {
     // 入れ替えるときは、古い jar を消す前にプラグインの設定フォルダを退避しておく(元に戻すときに戻す)
     const config = stale.length ? await saveConfig(target, p, stale[0].filename) : "";
 
-    // アップロードしたものは、保存先から読んでサーバーに送る。配布元のものは、サーバーに直接取り込ませる
+    // アップロードしたものは、保存先から読んでサーバーに送る。配布元のものは、サーバーに直接取り込ませる(パネルが断れば、このアプリが取ってきて送る)
     if (file.upload) {
       // 一時フォルダに少しずつ写してから送る(1 GB の jar もメモリに全部を載せない)
       await files.withTemp(teamId, file.upload, (path) => remote(() => client.upload(remoteId, dir, file.filename, path)));
     } else {
-      await remote(() => client.pull(remoteId, file.url, dir, file.filename));
+      await remote(() => client.pull(remoteId, file.url, dir, file.filename, file.sha512));
     }
 
     if (stale.length) {
@@ -620,10 +638,10 @@ export function modTools(deps: Deps) {
       if (item) await files.saveUpstream(teamId, userId, item, file).catch((e) => console.error("[保存] 配布元の版を保存できませんでした:", e instanceof Error ? e.message : e));
     }
 
-    // 前提(Modrinth・CurseForge の必須)のうち、このサーバーにまだ無いもの。入れられなくても、もとのものは入れたまま
+    // 前提(Modrinth・CurseForge・Hangar の必須)のうち、このサーバーにまだ無いもの。入れられなくても、もとのものは入れたまま
     const deps: Installed["deps"] = [];
     const depth = opts.depth ?? 2;
-    if ((source === "modrinth" || source === "curseforge") && depth > 0 && file.deps?.length) {
+    if ((source === "modrinth" || source === "curseforge" || source === "hangar") && depth > 0 && file.deps?.length) {
       const have = new Set((await db.select({ id: installedMod.projectId }).from(installedMod)
         .where(and(eq(installedMod.serverId, row.id), eq(installedMod.source, source)))).map((x) => x.id));
       for (const dep of file.deps.filter((d) => !have.has(d))) {
@@ -768,10 +786,10 @@ export function modTools(deps: Deps) {
       }
     }
     const errors: string[] = [];
-    const todo = items.filter((i) => i.source === "modrinth" || i.source === "curseforge");
+    const todo = items.filter((i) => i.source === "modrinth" || i.source === "curseforge" || i.source === "hangar");
     for (let k = 0; k < todo.length; k += 8) { // 配布元に一度に送りすぎない
       await Promise.all(todo.slice(k, k + 8).map(async (it) => {
-        const src = it.source as "modrinth" | "curseforge";
+        const src = it.source as "modrinth" | "curseforge" | "hangar";
         const key = `deps:${src}:${it.projectId}:${p.platform}:${p.mcVersion ?? ""}`;
         const memo = it.installed ? `${teamId}:${key}:${it.installed}` : "";
         const hit = memo ? memoGet(memo) : undefined;
@@ -803,15 +821,15 @@ export function modTools(deps: Deps) {
     return { missing: missing.sort((a, b) => a.title.localeCompare(b.title)), errors: [...new Set(errors)] };
   }
 
-  return { metasIn, unmetOf, teamPinsOf, files, missingOf, pickOf, modrinth, spiget, curseforge, cfKeyOf, latestFile, latestChecked, fileById, versionsOf, mergedRows, project, profileOf, needProfile, remember, installInto, holdsOf, pinsOf, updatesOf, logChange, removeFrom, restoreConfig, identifyIn, dirOf, addonsIn, packVersions };
+  return { metasIn, unmetOf, teamPinsOf, files, missingOf, pickOf, modrinth, spiget, hangar, curseforge, cfKeyOf, latestFile, latestChecked, fileById, versionsOf, mergedRows, project, profileOf, needProfile, remember, installInto, holdsOf, pinsOf, updatesOf, logChange, removeFrom, restoreConfig, identifyIn, dirOf, addonsIn, packVersions };
 }
 
 export function libraryService(deps: Deps) {
   const { db, auth } = deps;
   const { record } = eventService(deps);
-  const { metasIn, unmetOf, teamPinsOf, files, missingOf, modrinth, spiget, curseforge, cfKeyOf, latestFile, latestChecked, fileById, versionsOf, mergedRows, project, profileOf, needProfile, remember, installInto, holdsOf, pinsOf, updatesOf, logChange, removeFrom, restoreConfig, identifyIn, dirOf, addonsIn, packVersions } = modTools(deps);
+  const { metasIn, unmetOf, teamPinsOf, files, missingOf, modrinth, spiget, hangar, curseforge, cfKeyOf, latestFile, latestChecked, fileById, versionsOf, mergedRows, project, profileOf, needProfile, remember, installInto, holdsOf, pinsOf, updatesOf, logChange, removeFrom, restoreConfig, identifyIn, dirOf, addonsIn, packVersions } = modTools(deps);
   // このチームで探せる配布元(CurseForge は API キーを設定したときだけ)
-  const sourcesOf = async (teamId: string) => ["modrinth", "spigot", ...((await cfKeyOf(teamId)) ? ["curseforge"] : [])];
+  const sourcesOf = async (teamId: string) => ["modrinth", "spigot", "hangar", ...((await cfKeyOf(teamId)) ? ["curseforge"] : [])];
   const sourceOf = (v: string) => {
     if (!isItemSource(v)) throw new HttpError(400, "配布元を選んでください");
     return v;
@@ -829,13 +847,13 @@ export function libraryService(deps: Deps) {
     return i;
   }
 
-  /** 配布元のページの URL → 配布元とプロジェクトの ID(Modrinth・SpigotMC・CurseForge。Hangar はまだ扱えない) */
+  /** 配布元のページの URL → 配布元とプロジェクトの ID(Modrinth・SpigotMC・CurseForge・Hangar) */
   async function resolveUrl(teamId: string, url: string) {
     const u = parseSourceUrl(url);
-    if (!u) throw new HttpError(400, "Modrinth・SpigotMC・CurseForge のプロジェクトのページの URL を入力してください");
-    if (u.source === "hangar") throw new HttpError(400, "Hangar は、まだ配布元として使えません(同じものが Modrinth にあれば、Modrinth のページの URL を入力してください)");
+    if (!u) throw new HttpError(400, "Modrinth・SpigotMC・CurseForge・Hangar のプロジェクトのページの URL を入力してください");
     if (u.source === "spigot") return { source: u.source, projectId: u.ref, type: u.type };
     const id = u.source === "modrinth" ? (await fromSource(() => modrinth.project(u.ref)))?.id
+      : u.source === "hangar" ? (await fromSource(() => hangar.project(u.ref)))?.id
       : await fromSource(async () => (await curseforge(teamId)).bySlug(u.ref, u.type));
     if (!id) throw new HttpError(404, `${SOURCE_LABEL[u.source]} にこのプロジェクトが見つかりません`);
     return { source: u.source, projectId: id, type: u.type };
@@ -1028,8 +1046,9 @@ export function libraryService(deps: Deps) {
       if (!isItemType(type)) throw new HttpError(400, "種類を選んでください");
       const src = searchable(source);
       if (src === "spigot" && type !== "plugin") throw new HttpError(400, "SpigotMC で探せるのはプラグインだけです");
+      if (src === "hangar" && type !== "plugin") throw new HttpError(400, "Hangar で探せるのはプラグインだけです");
       const cf = src === "curseforge" ? await curseforge(teamId) : null;
-      return fromSource(() => (cf ? cf.searchType(query, type) : src === "spigot" ? spiget.searchAll(query) : modrinth.searchType(query, type)));
+      return fromSource(() => (cf ? cf.searchType(query, type) : src === "spigot" ? spiget.searchAll(query) : src === "hangar" ? hangar.searchAll(query) : modrinth.searchType(query, type)));
     },
 
     /** CurseForge の API キーの設定(自分用の版・管理者以上。キーは最後の 4 文字だけ) */
@@ -1176,7 +1195,7 @@ export function libraryService(deps: Deps) {
       if (i.source === "upload") return [];
       if (i.source === "spigot") return fromSource(() => spiget.updates(i.projectId));
       const cf = i.source === "curseforge" ? await curseforge(teamId) : null;
-      const list = await fromSource(() => (cf ? cf.allFiles(i.projectId) : modrinth.allVersions(i.projectId)));
+      const list = await fromSource(() => (cf ? cf.allFiles(i.projectId) : i.source === "hangar" ? hangar.allVersions(i.projectId) : modrinth.allVersions(i.projectId)));
       // 同じ版が作りごと(Bukkit・Fabric など)に並ぶので、このアイテムの動く作り(直したもの、無ければ種類の作り)のものだけにする(1 つも無ければすべて)
       const want = (i.loaders && parseList(i.loaders)) || (i.projectType === "datapack" ? ["datapack"]
         : Object.values(PLATFORMS).filter((p) => p.type === i.projectType).flatMap((p) => [...p.loaders]));
@@ -1239,9 +1258,9 @@ export function libraryService(deps: Deps) {
         const list = rows.filter((r) => r.source === "curseforge" && r.teamId === teamId);
         if (key) await quiet(async () => take(list, await curseforgeClient(deps.fetch, key).projects(list.map((r) => r.projectId))));
       }
-      for (const r of rows.filter((x) => x.source === "spigot")) {
+      for (const r of rows.filter((x) => pluginOnly(x.source))) { // SpigotMC・Hangar はまとめて取れないので 1 つずつ
         await quiet(async () => {
-          const p = await spiget.project(r.projectId);
+          const p = await (r.source === "hangar" ? hangar : spiget).project(r.projectId);
           if (p) take([r], new Map([[r.projectId, p]]));
         });
       }
@@ -1445,13 +1464,16 @@ export function libraryService(deps: Deps) {
       const dp = kind === "datapack" ? "datapack" as const : undefined;
       if (dp && !profileFor(p, dp)) throw new HttpError(400, "このサーバーにはワールドが無いので、データパックは入れられません");
       if (src === "spigot" && (dp || PLATFORMS[p.platform].type !== "plugin")) throw new HttpError(400, "SpigotMC にあるのはプラグインだけです");
+      if (src === "hangar" && (dp || PLATFORMS[p.platform].type !== "plugin")) throw new HttpError(400, "Hangar にあるのはプラグインだけです");
       const cf = src === "curseforge" ? await curseforge(teamId) : null;
       const rank = { ok: 0, unknown: 1, no: 2 };
+      // Hangar のプロキシ向けの版は Minecraft のバージョンを持たないので、対応は「不明」にする
+      const mc = src === "hangar" && hangarPlatform(p.platform) !== "PAPER" ? null : p.mcVersion;
       return fromSource(async () => {
         if (src === "spigot") return (await spiget.search(query, p.platform)).map((h) => ({ ...h, support: supportOf(p.mcVersion, h.mcVersions ?? [], true) })).sort((a, b) => rank[a.support] - rank[b.support]);
-        const find = (mc: string | null) => (cf ? cf.search(query, p.platform, mc, dp) : modrinth.search(query, p.platform, mc, dp));
-        const fit = await find(p.mcVersion);
-        if (!p.mcVersion) return fit.map((h) => ({ ...h, support: "unknown" as Support }));
+        const find = (mc: string | null) => (cf ? cf.search(query, p.platform, mc, dp) : src === "hangar" ? hangar.search(query, p.platform, mc) : modrinth.search(query, p.platform, mc, dp));
+        const fit = await find(mc);
+        if (!mc) return fit.map((h) => ({ ...h, support: "unknown" as Support }));
         const seen = new Set(fit.map((h) => h.projectId)); // 配布元のバージョンの絞り込みから漏れたもの(そのバージョンの版が無い)も、あとに並べる
         return [...fit.map((h) => ({ ...h, support: "ok" as Support })), ...(await find(null)).filter((h) => !seen.has(h.projectId)).map((h) => ({ ...h, support: "no" as Support }))];
       });
@@ -1499,13 +1521,13 @@ export function libraryService(deps: Deps) {
         const chosen = rows.find((v) => v.versionId === versionId);
         if (!chosen) throw error && !rows.length ? error : new HttpError(400, "この版は、このサーバーの種類・バージョンに合いません");
         if (chosen.support === "no" && !unsupported) throw new HttpError(400, `この版は、このサーバーの Minecraft(${p.mcVersion})に対応していません(対応: ${mcRange(chosen.mcVersions) || "不明"})。確かめたうえで入れるときは unsupported: true を付けてください`);
-        file = await fileById(src, projectId, versionId, teamId);
+        file = await fileById(src, projectId, versionId, teamId, p.platform);
         if (!file) throw new HttpError(404, "その版は見つかりません");
         hold = bestOf(rows, sel.channel, sel.rank)?.versionId !== versionId;
       } else {
         // 結び付けたセットで版を固定しているものは、版を選ばなければ(「更新」を押しても)固定した版を入れる
         const pin = (await pinsOf(row.id)).get(`${src}:${projectId}`);
-        if (pin) file = await fileById(src, projectId, pin.versionId, teamId);
+        if (pin) file = await fileById(src, projectId, pin.versionId, teamId, p.platform);
       }
       const r = await jobService(deps).track({ teamId, userId: user.id, serverId: row.id, action: "入れる" },
         () => installInto(teamId, user.id, { row, client, remoteId }, p, src, projectId, file ? { file } : {}), (x) => `${x.title} ${x.versionNumber}`);
@@ -1527,7 +1549,7 @@ export function libraryService(deps: Deps) {
         .where(and(eq(installHistory.serverId, target.row.id), eq(installHistory.source, src), eq(installHistory.projectId, projectId)))
         .orderBy(desc(installHistory.replacedAt)).limit(1);
       if (!prev) throw new HttpError(404, "前の版の記録がありません");
-      const file = await fileById(src, projectId, prev.versionId, teamId);
+      const file = await fileById(src, projectId, prev.versionId, teamId, p.platform);
       if (!file) throw new HttpError(404, "前の版のファイルが、もう取ってこられません");
       const now = await db.select({ versionId: installedMod.versionId }).from(installedMod)
         .where(and(eq(installedMod.serverId, target.row.id), eq(installedMod.source, src), eq(installedMod.projectId, projectId)));
@@ -1594,7 +1616,7 @@ export function libraryService(deps: Deps) {
         if (files.some((f) => f.name === c.added)) await remote(() => client.deleteFiles(remoteId, dir, [c.added]));
         await db.delete(installedMod).where(and(eq(installedMod.serverId, row.id), eq(installedMod.filename, c.added)));
       } else if (c.action === "更新" && removed?.versionId && removed.source && removed.projectId && isItemSource(removed.source) && removed.source !== "spigot") {
-        const file = await fileById(removed.source, removed.projectId, removed.versionId, teamId);
+        const file = await fileById(removed.source, removed.projectId, removed.versionId, teamId, q.platform);
         if (!file) throw new HttpError(404, "前の版のファイルが、もう取ってこられません");
         await installInto(teamId, user.id, target, q, removed.source, removed.projectId, { file, depth: 0 });
         await db.insert(serverHold).values({ serverId: row.id, source: removed.source, projectId: removed.projectId, createdBy: user.id }).onConflictDoNothing();
