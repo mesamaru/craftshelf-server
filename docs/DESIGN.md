@@ -43,6 +43,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 - 本番のビルドでは `instance.ts` が 2 つの束(サーバーの関数 / サーバーのルートと起動時の処理)に別々に入る。データベース(`createDb`)とエージェントの列(`hub`)は `globalThis` でプロセスに 1 つにする(03.56.00 から。PGlite を 2 回開くと、互いの書き込みが見えない)。束ごとにクラスも別にできるので、`HttpError` は `instanceof` ではなく `isHttpError(e)`(名前と `status`)で見分ける(03.67.01 から)。独自のルート(`src/routes/api/**`)・REST API は、本文を読む前に権限(トークン)を確かめ、`readBody(request, 上限)` で上限付きで少しずつ読む。
 - 認証の表(`src/server/db/auth-schema.ts`)は `npm run auth:schema` で作る。Better Auth の設定(プラグイン)を変えたら作り直し、続けて `npm run db:generate`。
 - サーバーだけで動く処理は `src/server/` に置き、画面からは `createServerFn` かサーバーのルート(`src/routes/api/`)を通して使う。認証の確認は、画面の `beforeLoad` だけでなく、サーバー側の処理ごとに必ず行う。
+- セキュリティヘッダー(03.97.00 から。`src/server/security.ts`、Nitro のプラグイン `compress-plugin.ts` で全部の応答に付ける): CSP(スクリプトは自分のものと nonce の付いたものだけ・`frame-ancestors 'none'`・`connect-src 'self'`。画像は配布元のアイコンのため https も、style は React の style 属性のため `'unsafe-inline'`)・`X-Frame-Options: DENY`・`nosniff`・`Referrer-Policy: same-origin`、`/api/`・`/_serverFn/` は決めていなければ `Cache-Control: no-store`。ページの nonce は `src/router.tsx` がリクエストごとに作り、ルーターの `ssr.nonce`(TanStack が入れるスクリプトに付く)と CSP のヘッダーに同じ値を入れる。開発中(vite dev)は nonce を付けない。e2e は CSP で止められたもの(コンソールの警告)が無いかも確かめる。
 - 利用者の IP は、Cloudflare Tunnel が付ける `cf-connecting-ip` を使う(`CLIENT_IP_HEADER`)。app のポートを外に出さない構成のときだけ信頼できる。
 
 ## チームと権限
@@ -67,6 +68,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 ## Pterodactyl に直接つなぐ
 
 - チームがパネルの URL と Client API キー(`ptlc_…`)を登録し、パネルのサーバーを選んでチームのサーバーとして追加する(表 `ptero_connection`・`server`)。
+- 証明書を確かめない(03.99.02 から。`ptero_connection.insecure`、v02 の `ptero_insecure`): 自分用の版だけ。自己署名の証明書の https のパネルに、`net.ts` の `lanInsecureFetch`(undici の `rejectUnauthorized: false`)でつなぐ(Wings の署名付き URL も同じ)。配布元からファイルを取ってくる `relay` は、いつもの fetch(確かめる)を使う(`pteroClient` の `verified`)。サービス版は設定があっても確かめ、設定もさせない(`pteroFetch`)。登録のときと、登録したパネルの行で切り替えられる(管理者以上)。v02 から取り込むときは、そのまま引き継ぐ。
 - **API キーは AES-256-GCM で暗号化して保存する**(`src/server/secrets.ts`)。鍵は `BETTER_AUTH_SECRET` から HKDF で作り、行ごとの ID を一緒に渡して、ほかの行へ写し替えても読めないようにする。画面には最後の 4 文字だけを出す。
   - `BETTER_AUTH_SECRET` を変えると、保存したキーは読めなくなる(登録し直しになる)。鍵を入れ替えられるよう、保存する文字列の先頭に版(`v1:`)を付けている。
 - **利用者が入力した URL へつなぐときは、必ず `safeFetch`(`src/server/net.ts`)を使う**。このアプリは家の LAN の中で動くので、LAN の中の機器(ルーター・NAS など)やクラウドのメタデータにつながれると危ない(SSRF)。
@@ -144,6 +146,8 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 設定では「操作の記録」(`/activity`)と「Discord への通知」(`/activity?s=notify`)を別の項目に分けている(03.89.00 から)。
 
 - 操作の記録(表 `audit_log`。`src/server/events.ts` の `record`)。各サービスの、変える操作の最後に記録する(だれが・何を・どのサーバーに・詳しい内容)。予約で動いたものは user_id が null。見られるのは `member: ["update"]`(管理者以上)。画面では操作・対象・詳しく・人の名前で探せる(`list` の `q`、ILIKE。`%`・`_` はそのままの文字)。
+- ログイン・アカウントの操作(03.98.00 から。`auth.ts` の Better Auth の `hooks`): ログイン(パスワード・ユーザー名・パスキー・二段階認証の確かめ。IP 付き)・ログインに失敗(メールアドレスかユーザー名と IP。いる人ならその人の最初のチーム、いない人は自分用の版だけそのチームに)・ログアウト・パスワードを変える・メンバーを招待・役割を変える・外すを、種類 `account` で `audit_log` に直接書く(`EVENT_KINDS` に入れない: Discord には送らず、お知らせ(ベル)にも出さない。操作の記録の画面には出る)。書けなくてもログインなどは止めない。
+- 古い記録を消す(03.99.00 から。`events.prune`): チームごとに新しい `AUDIT_KEEP`(2 万件。v02 の `prune_audit` と同じ)だけ残す。`startup.ts` が起動の 30 秒あとと 1 時間ごとに呼ぶ。
 - Discord への通知(表 `team_notify`)。Webhook の URL は `seal` で暗号化して保存し、`https://discord.com/api/webhooks/…`(discordapp.com・ptb・canary を含む)だけを受け付ける。記録の種類(`EVENT_KINDS`: changes・sets・schedule・power・admin・updates・auto・errors・backup・panel)のうち、選んだものだけを送る。記録は 1 つの種類(`kind`)で残し、ほかにも当てはまる種類は `also` で渡す(自動更新・予約で入れた → auto、失敗 → errors、バックアップ → backup。前からの種類を選んだチームにも、前と同じように届く)。`allowed_mentions` を空にしてメンションさせない。送れなくても、もとの操作は失敗させない。
 
 - 新しい版の見回り(`setService.runUpdateChecks`、1 分ごと): 前に確かめてから 1 日(`UPDATE_CHECK_EVERY`)たったサーバーを 1 回に 2 台まで、`update_checked_at` を条件付きで書き換えてから確かめる(配布元へは入っているもの 1 つにつき 1 回。自動更新を入れたサーバーは見ない)。見つけた行を `server.update_notice` に残し、前に知らせていない行だけを `updates` で記録する。
@@ -301,6 +305,7 @@ v02(Python、`main`)は、v03 へ移れるようにしたところで更新を�
 ## 処理の一覧・個人の設定・ホーム画面に追加(03.57.00 から)
 
 - 処理の一覧(`src/server/jobs.ts`、表 `job`、画面 `/jobs`): 時間のかかる処理を、待ち(`queued`)・実行中・成功・失敗で残す。各サービスが `jobService(deps).track(情報, 処理, 結果のまとめ)` で包む(まとめての処理は `queue` で先に待ちとして並べる)。書いているのは、サーバーへの導入・セットを入れる・セットでそろえる・ほかのサーバーにそろえる・まとめて最新にする・自動更新・予約・サーバー本体の入れ替えと戻す・ワールドのバックアップと戻す・パネルのバックアップ。状態を書けなくても処理は止めない。サーバーごとの自動更新は、何も変えなかった回は終わったあと一覧から消す(`track` の `keep`)。終わってから 30 日で消す。起動したとき(`instance.ts` の `build()`、リクエストを受ける前)に、待ち・実行中のまま残ったものを失敗にする(プロセスは 1 つの前提)。見られるのはチームのメンバー全員(サーバーを割り当てられた人は、そのサーバーのものと自分の操作だけ)。
+- 途中経過(03.99.01 から。表 `job` の `progress_done`・`progress_total`・`progress_note`): `track`・`queue` は処理を `AsyncLocalStorage` の中で動かし、処理の中のどこからでも `progress(done, total, 中身)` で知らせられる(外では何もしない。引数を通さずに済む)。書くのは 1 秒に 1 回まで(done = total は必ず)。終わったときの状態を上書きしないよう、書き込みを待ってから結果を書く。知らせているのは、セットを入れる・そろえる・まとめて最新・自動更新・予約(`sets.applyTo` のアイテムごと)・保存先のファイルを移す(ファイルごと)・ワールドのバックアップ(読んだファイルの数。全部の数は分からないので total は null)。画面は `JobRow` が実行中の行に棒と「done / total · 中身」を出す(処理の画面は動いているあいだ 3 秒ごとに読み直す)。
 - 1 分ごとの処理(`startup.ts` の `minuteTasks`): 処理ごとに独立して動かし、前の回が終わっていない処理だけを飛ばす(どれかが返ってこなくても、ほかは毎回動く)。
 - 個人の設定(`src/server/prefs.ts`、表 `user_pref`): 見た目(明るさ・アクセント・テーマ・背景の暗さとぼかし)をアカウントに保存し、`getAppState` で渡す。画面はアカウントの値を当て、まだ無ければブラウザの値を使ってアカウントにも保存する。背景画像(03.63.00 から。前はブラウザごと)は、画面で長い辺 1920 px の JPEG に縮めて(収まらなければもっと縮めて)`saveMyBackground` で送り、`user_pref.background`(data URL。中身の先頭で PNG・JPEG・WebP・GIF か確かめ、`PREF_LIMITS.backgroundBytes` = 2 MB まで)に置く。画面は `/api/me/background?v=<変えた時刻>`(本人だけ。場所が変わるまでキャッシュ)から読む。`background_at` が null(一度も決めていない)の人は、前にブラウザに置いた背景画像をアカウントに移す。v02 の「マイ画像」(テーマ custom の `bg_file`)は `maybeImportV02Backgrounds` が一度だけ引き継ぐ(2 MB を超えるものは理由を `/data/v03/import-v02-background.json` に残す)。テーマは v02 の 8 つ(`src/lib/theme.ts` の `PRESETS`。明るさとアクセントの色も決める)と標準。背景は `body::before`(ぼかし `--bg-blur`)・`body::after`(暗さ `--bg-dim`)に置く。v02 の個人設定は `maybeImportV02Prefs` で一度だけ引き継ぐ(`/data/v03/import-v02-prefs.json`)。
 - ホーム画面に追加(PWA): `public/manifest.webmanifest`・アイコン(v02 と同じ)・`public/sw.js`。サービスワーカーは画面を保存せず、つながらないときだけ `public/offline.html`(「つながっていません」)を出す。本番のビルドで、https か localhost のときだけ登録する。

@@ -14,6 +14,8 @@ export const pteroConnection = pgTable(
     apiKeyHint: text("api_key_hint").notNull(),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // 03.99.02 から。証明書を確かめない(自己署名の証明書のパネル。自分用の版だけ。v02 の ptero_insecure)
+    insecure: boolean("insecure").notNull().default(false),
   },
   (t) => [index("ptero_connection_team_idx").on(t.teamId)],
 );
@@ -586,6 +588,10 @@ export const job = pgTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
     startedAt: timestamp("started_at"),
     finishedAt: timestamp("finished_at"),
+    // 03.99.01 から。途中経過(done / total 個目と、いまの中身)。total が null なら数が分からない
+    progressDone: integer("progress_done"),
+    progressTotal: integer("progress_total"),
+    progressNote: text("progress_note").notNull().default(""),
   },
   (t) => [index("job_team_created_idx").on(t.teamId, t.createdAt)],
 );
